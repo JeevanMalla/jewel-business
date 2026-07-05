@@ -25,6 +25,7 @@ def _col(name):
 def get_all_orders(filters=None):
     try:
         docs = list(_col("orders").find(filters or {}).sort("created_at", -1))
+        print(docs)
         for d in docs:
             d["_id"] = str(d["_id"])
         return docs
