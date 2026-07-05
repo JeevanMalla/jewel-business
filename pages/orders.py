@@ -7,7 +7,10 @@ import pandas as pd
 from datetime import date
 
 from config.settings import ORDER_STATUSES
-from services.database import get_all_orders, update_order, delete_order, get_order_vendor_summary, save_transaction
+from services.database import (
+    get_all_orders, update_order, delete_order, get_order_vendor_summary,
+    save_transaction, init_production_pipeline,
+)
 from components.image_uploader import render_image_gallery, render_image_uploader
 from components.vendor_panel import render_vendor_panel
 
@@ -175,6 +178,9 @@ def render():
                     ):
                         update_order(oid, {"status": "Pending"})
 
+                        # ── Start the production pipeline now that it's a real order ──
+                        init_production_pipeline(oid)
+
                         # ── Post vendor ledger now that it's a confirmed order ──
                         vendor_name = str(row.get("vendor", "") or "")
                         if vendor_name:
@@ -261,6 +267,15 @@ def render():
                     if st.button("🗑️ Delete", key=f"del_{oid}", use_container_width=True):
                         delete_order(oid)
                         st.warning("Deleted.")
+                        st.rerun()
+
+                # Jump straight to the Production board for this order —
+                # only makes sense once it's a real order, not an Estimate.
+                if not is_estimate:
+                    st.markdown("---")
+                    if st.button("🏭 Open Production", key=f"prod_{oid}", use_container_width=True):
+                        st.session_state["production_open_order"] = oid
+                        st.session_state["nav_request"] = "🏭 Production"
                         st.rerun()
 
     # ── Export ────────────────────────────────────────────────────────────────

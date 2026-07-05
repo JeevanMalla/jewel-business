@@ -19,6 +19,10 @@ elif page == "📦 Orders":
     from pages.orders import render
     render()
 
+elif page == "🏭 Production":
+    from pages.production import render
+    render()
+
 elif page == "💰 Finance":
     from pages.finance import render
     render(gold_base)

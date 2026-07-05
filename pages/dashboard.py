@@ -16,6 +16,7 @@ def render():
     st.markdown("---")
 
     all_orders = get_all_orders()
+    print(all_orders)
 
     if not all_orders or not isinstance(all_orders, list):
         st.info("📭 No orders yet. Head to **New Estimation** to create your first order!")
