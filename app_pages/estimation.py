@@ -191,7 +191,7 @@ def render(gold_base, diamond_base, shape_dfs):
         gppg = round(gold_base * pf, 2)
         with g3: st.metric("Sell Rate/gram", f"₹ {gppg:,.2f}")
         with g4: gold_cost_per_gram = st.number_input("Cost Rate/gram (vendor)", value=gppg, step=10.0, key="gold_cost_gram")
-        with g5: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=5.500, step=0.001, format="%.3f")
+        with g5: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=0.000, step=0.001, format="%.3f")
         gold_value      = round(gppg * gold_weight, 0)
         gold_cost_value = round(gold_cost_per_gram * gold_weight, 0)
         with g6: st.metric("Sell Value", f"₹ {gold_value:,.0f}")
@@ -202,7 +202,7 @@ def render(gold_base, diamond_base, shape_dfs):
         st.markdown('<div class="gold-header">💎 Diamond Details</div>', unsafe_allow_html=True)
         diamond_rows = _render_diamond_rows(shape_dfs, diamond_base)
 
-        col_add, col_summary = st.columns([1, 3])
+        col_add, col_summary = st.columns([1, 2])
         with col_add:
             if st.button("➕ Add Diamond Group", use_container_width=True):
                 st.session_state.diamond_rows.append(
