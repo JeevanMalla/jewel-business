@@ -36,8 +36,7 @@ def _default_diamond_row(label="Centre Stone"):
 def _init_diamonds():
     if "diamond_rows" not in st.session_state:
         st.session_state.diamond_rows = [
-            _default_diamond_row("Centre Stone"),
-            _default_diamond_row("Side Diamonds"),
+            _default_diamond_row("Centre Stone")
         ]
 
 
