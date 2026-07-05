@@ -9,8 +9,10 @@ from datetime import date
 from config.settings import ORDER_STATUSES
 from services.database import (
     get_all_orders, update_order, delete_order, get_order_vendor_summary,
-    save_transaction, init_production_pipeline,
+    save_transaction, init_production_pipeline, mark_order_delivered,
+    get_setting, get_order_stages,
 )
+from services.pdf_generator import generate_karigar_pdf
 from components.image_uploader import render_image_gallery, render_image_uploader
 from components.vendor_panel import render_vendor_panel
 
@@ -61,7 +63,11 @@ def render():
 
     # ── Filters ───────────────────────────────────────────────────────────────
     f1, f2, f3, f4 = st.columns(4)
-    with f1: search      = st.text_input("🔍 Search customer / order ID")
+    with f1:
+        # key="order_search" lets other pages (e.g. Dashboard's Upcoming
+        # Deadlines list) deep-link straight to an order by setting
+        # st.session_state["order_search"] before switching tabs here.
+        search = st.text_input("🔍 Search customer / order ID", key="order_search")
     with f2: status_filter = st.selectbox("Status", ["All", "Estimate", "── Orders ──",
                                                       "Pending", "In Progress", "Quality Check",
                                                       "Ready for Delivery", "Delivered"])
@@ -100,10 +106,13 @@ def render():
 
         is_estimate = str(row.get("status","")) == "Estimate"
         badge = "📋 ESTIMATE  " if is_estimate else "🔖 "
+        # Auto-expand the card if we were deep-linked here for this exact order
+        deep_linked = bool(search) and search.strip().lower() == oid.lower()
         with st.expander(
             f"{badge}{oid}  —  {row['customer']}  |  "
             f"{row['item_type']}  |  "
-            f"₹{row['gross']:,.0f}  |  **{row['status']}**"
+            f"₹{row['gross']:,.0f}  |  **{row['status']}**",
+            expanded=deep_linked,
         ):
             detail_tab, vendor_tab, image_tab, action_tab = st.tabs(
                 ["📋 Details", "🏭 Vendor & Costs", "🖼️ Images", "✏️ Actions"]
@@ -261,6 +270,8 @@ def render():
                 with a2:
                     if st.button("✅ Update Status", key=f"upd_{oid}", use_container_width=True):
                         update_order(oid, {"status": new_status})
+                        if new_status == "Delivered":
+                            mark_order_delivered(oid, "Admin")
                         st.success("Updated!")
                         st.rerun()
                 with a3:
@@ -277,6 +288,31 @@ def render():
                         st.session_state["production_open_order"] = oid
                         st.session_state["nav_request"] = "🏭 Production"
                         st.rerun()
+
+                # Karigar work order — technical specs + images only, no pricing.
+                st.markdown("---")
+                st.markdown("**📄 Karigar Work Order**")
+                st.caption("Gold/diamond specs + reference images only — no prices, no GST.")
+                karigar_doc = row.to_dict()
+                karigar_doc["due_date"]     = dd.strftime("%d %b %Y") if pd.notna(dd) else "—"
+                karigar_doc["gold_weight"]  = row.get("gold_wt", 0)
+                stage_imgs = []
+                for s in get_order_stages(oid):
+                    stage_imgs.extend(s.get("images", []))
+                karigar_doc["stage_images"] = stage_imgs
+
+                if st.button("📄 Generate Karigar PDF", key=f"kar_gen_{oid}", use_container_width=True):
+                    business_name = get_setting("business_name", "Your Jewellery House")
+                    logo_bytes    = st.session_state.get("logo_bytes")
+                    pdf_bytes     = generate_karigar_pdf(karigar_doc, business_name, logo_bytes)
+                    st.download_button(
+                        "⬇️ Download Karigar PDF",
+                        data=pdf_bytes,
+                        file_name=f"karigar_{oid}.pdf",
+                        mime="application/pdf",
+                        key=f"kar_dl_{oid}",
+                        use_container_width=True,
+                    )
 
     # ── Export ────────────────────────────────────────────────────────────────
     st.markdown("---")

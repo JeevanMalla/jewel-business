@@ -19,6 +19,7 @@ from services.database import (
     flag_stage_needs_changes,
     add_stage_image,
     get_production_events,
+    mark_order_delivered,
 )
 from services.cloudinary import upload_image_widget
 
@@ -60,6 +61,18 @@ def render_timeline(order_id: str, order_doc: dict, user: str = "Admin"):
         if current["stage_name"] == "Customer CAD Approval":
             if st.button("⚠️ Needs Changes", use_container_width=True, key=f"needs_{order_id}"):
                 flag_stage_needs_changes(order_id, current["stage_name"], user=user)
+                st.rerun()
+
+    if current["stage_name"] != "Delivered":
+        with st.expander("⏩ Skip straight to Delivered (override)"):
+            st.caption(
+                "Closes out every remaining stage immediately — use for rush "
+                "jobs, walk-in pickups, or backfilling an order that was "
+                "already completed before this system was in place."
+            )
+            if st.button("⏩ Mark as Delivered", key=f"deliver_{order_id}", use_container_width=True):
+                mark_order_delivered(order_id, user)
+                st.success("Order marked as Delivered.")
                 st.rerun()
 
     st.markdown("---")

@@ -8,6 +8,7 @@ Two document types:
 Both handle multi-diamond rows (centre stone + side diamonds etc.)
 """
 import io
+import urllib.request
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -31,6 +32,20 @@ RED   = colors.HexColor("#c0392b")
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
+def _fetch_image_flowable(url: str, width, height):
+    """
+    Downloads an image (e.g. a Cloudinary URL) for embedding in the PDF.
+    Returns None on any failure — a broken/slow image link should never
+    crash the whole PDF.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = resp.read()
+        return RLImage(io.BytesIO(data), width=width, height=height)
+    except Exception:
+        return None
+
+
 def _styles():
     s = getSampleStyleSheet()
     s.add(ParagraphStyle("RightAlign",  alignment=TA_RIGHT,  fontSize=9))
@@ -135,14 +150,15 @@ def _build_customer_table(e: dict, styles) -> list:
 
 
 def _build_gold_section(e: dict, styles) -> list:
+    gold_color = e.get("gold_color", "Yellow Gold")
+    rows = [
+        ["Purity", e["gold_purity"], "Colour", gold_color],
+        ["Weight", f"{e['gold_weight']:.3f} g", "Rate/g", f"₹ {e['gold_price_gram']:,.2f}"],
+        ["Value",  f"₹ {e['gold_value']:,.0f}", "", ""],
+    ]
     return [
         _section_header("🥇 Gold Details", styles),
-        _data_table([[
-            "Purity",  e["gold_purity"],
-            "Weight",  f"{e['gold_weight']:.3f} g",
-            "Rate/g",  f"₹ {e['gold_price_gram']:,.2f}",
-            "Value",   f"₹ {e['gold_value']:,.0f}",
-        ]], [35*mm, 38*mm, 22*mm, 26*mm, 22*mm, 26*mm, 18*mm, 28*mm]),
+        _data_table(rows, [30*mm, 55*mm, 30*mm, 55*mm]),
         Spacer(1, 3*mm),
     ]
 
@@ -401,6 +417,156 @@ def generate_invoice_pdf(
             "This is a computer-generated invoice. No separate signature required unless specified.",
             styles["SmallCenter"],
         ),
+    ]
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+def generate_karigar_pdf(
+    order: dict,
+    business_name: str,
+    logo_bytes: bytes | None = None,
+) -> bytes:
+    """
+    Work-order PDF for the karigar (craftsman) — technical specs only.
+    Deliberately excludes anything money-related: no sell rates, no GST,
+    no totals, no vendor cash figures. Just what's needed to make the
+    piece: gold spec, diamond spec, notes, and every reference/CAD/
+    progress photo attached to the order so far.
+
+    `order` should be the order document (or an equivalent dict) — this
+    accepts the same shape you already pass to generate_estimation_pdf,
+    plus an optional "stage_images" list (photos captured during
+    Production) and "gold_color" ("White Gold" / "Yellow Gold" / "Rose
+    Gold") if you've started collecting that field.
+    """
+    e      = order
+    buf    = io.BytesIO()
+    styles = _styles()
+    doc    = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=15*mm, rightMargin=15*mm,
+        topMargin=15*mm,  bottomMargin=15*mm,
+    )
+
+    story = []
+    story += _build_header(e, "KARIGAR WORK ORDER", e.get("order_id", ""), business_name, logo_bytes, styles)
+
+    # ── Order essentials (no pricing) ───────────────────────────────────────
+    ct = Table([
+        [Paragraph("<b>Order ID</b>", styles["Normal"]), e.get("order_id", ""),
+         Paragraph("<b>Due Date</b>", styles["Normal"]), e.get("due_date", "")],
+        [Paragraph("<b>Item</b>", styles["Normal"]), e.get("item_desc", ""),
+         Paragraph("<b>Type</b>", styles["Normal"]), e.get("item_type", "")],
+    ], colWidths=[28*mm, 75*mm, 22*mm, 55*mm])
+    ct.setStyle(TableStyle([
+        ("FONTSIZE",      (0, 0), (-1, -1), 9),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("BOX",       (0, 0), (-1, -1), 0.5, GREY),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, LGREY),
+    ]))
+    story += [ct, Spacer(1, 4*mm)]
+
+    # ── Gold specification (weight/purity/colour only — no rate, no value) ──
+    gold_color = e.get("gold_color", "Yellow Gold")
+    gold_wt    = float(e.get("gold_weight", e.get("gold_wt", 0)) or 0)
+    story += [
+        _section_header("🥇 Gold Specification", styles),
+        _data_table([
+            ["Purity", e.get("gold_purity", ""), "Colour", gold_color],
+            ["Weight", f"{gold_wt:.3f} g", "", ""],
+        ], [30*mm, 55*mm, 30*mm, 55*mm]),
+        Spacer(1, 3*mm),
+    ]
+
+    # ── Diamond specification (technical only — no ₹ columns) ───────────────
+    rows = e.get("diamond_rows", [])
+    if rows:
+        header = ["Group / Label", "Type", "Shape", "Sieve", "Quality", "PCS", "TCW (ct)"]
+        cw     = [40*mm, 22*mm, 22*mm, 18*mm, 22*mm, 16*mm, 20*mm]
+        table_rows = [header]
+        for r in rows:
+            table_rows.append([
+                r.get("label", ""),
+                r.get("diamond_type", ""),
+                r.get("shape", ""),
+                str(r.get("sieve", "")),
+                r.get("quality", ""),
+                str(r.get("pcs", "")),
+                f"{r.get('tcw', 0):.4f}",
+            ])
+        t = Table(table_rows, colWidths=cw)
+        t.setStyle(TableStyle([
+            ("FONTSIZE",       (0, 0), (-1, -1), 8),
+            ("TOPPADDING",     (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING",  (0, 0), (-1, -1), 4),
+            ("BACKGROUND",     (0, 0), (-1, 0), DARK),
+            ("TEXTCOLOR",      (0, 0), (-1, 0), WHITE),
+            ("FONTNAME",       (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, LIGHT]),
+            ("BOX",            (0, 0), (-1, -1), 0.5, GREY),
+            ("INNERGRID",      (0, 0), (-1, -1), 0.3, LGREY),
+        ]))
+        story += [_section_header("💎 Diamond Specification", styles), t, Spacer(1, 3*mm)]
+
+    if e.get("notes"):
+        story += [
+            Paragraph(f"<font size=9><b>Notes:</b> {e['notes']}</font>", styles["Normal"]),
+            Spacer(1, 3*mm),
+        ]
+
+    # ── Reference & progress images ──────────────────────────────────────────
+    image_fields = [
+        ("item_image",     "Item / Product Reference"),
+        ("customer_image", "Customer Reference"),
+        ("cad_image",      "CAD Design"),
+    ]
+    imgs_to_show = []
+    for key, label in image_fields:
+        url = e.get(key)
+        if url:
+            imgs_to_show.append((label, url))
+    for url in (e.get("stage_images") or []):
+        if url:
+            imgs_to_show.append(("Production Photo", url))
+
+    if imgs_to_show:
+        story += [_section_header("🖼️ Reference Images", styles), Spacer(1, 2*mm)]
+        cells = []
+        for label, url in imgs_to_show:
+            flow = _fetch_image_flowable(url, width=55*mm, height=55*mm)
+            if flow:
+                cells.append((flow, label))
+        for i in range(0, len(cells), 3):
+            chunk    = cells[i:i + 3]
+            imgs_row = [c[0] for c in chunk]
+            caps_row = [Paragraph(f"<font size=8>{c[1]}</font>", styles["SmallCenter"]) for c in chunk]
+            while len(imgs_row) < 3:
+                imgs_row.append("")
+                caps_row.append("")
+            it = Table([imgs_row, caps_row], colWidths=[58*mm]*3)
+            it.setStyle(TableStyle([
+                ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
+                ("TOPPADDING",    (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            story += [it, Spacer(1, 3*mm)]
+    else:
+        story += [
+            Paragraph("<font size=9 color='#999'>No reference images uploaded for this order yet.</font>", styles["Normal"]),
+            Spacer(1, 3*mm),
+        ]
+
+    # ── Acknowledgement line ─────────────────────────────────────────────────
+    story += [
+        Spacer(1, 8*mm),
+        HRFlowable(width="100%", thickness=0.5, color=GREY),
+        Spacer(1, 3*mm),
+        Paragraph("Karigar Signature: ______________________&nbsp;&nbsp;&nbsp;&nbsp;Date: ______________", styles["Normal"]),
     ]
 
     doc.build(story)
