@@ -54,6 +54,14 @@ def upload_image_widget(
     """
     Renders a single file uploader + preview.
     Returns the secure_url string if uploaded, else None.
+
+    Streamlit reruns the entire script on every interaction anywhere on
+    the page — not just when this widget changes — and st.tabs() runs
+    both tabs' code every rerun regardless of which is visible. Without
+    caching, the same already-uploaded file would get re-uploaded to
+    Cloudinary on every unrelated keystroke/click elsewhere on the page.
+    So: once a given physical file has been uploaded, its URL is cached
+    in session_state and reused until a *different* file is selected.
     """
     st.markdown(f"**{label}**")
     uploaded = st.file_uploader(
@@ -62,17 +70,30 @@ def upload_image_widget(
         key=widget_key,
         label_visibility="collapsed",
     )
-    if uploaded:
-        with st.spinner(f"Uploading {label}…"):
-            try:
-                result = upload_image(
-                    uploaded.read(),
-                    f"{order_id}_{img_key}",
-                )
-                url = result["secure_url"]
-                st.success("✅ Uploaded")
-                st.image(url, use_column_width=True)
-                return url
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
+
+    if not uploaded:
+        return None
+
+    cache_key = f"{widget_key}_cloudinary_url"
+    id_key    = f"{widget_key}_file_id"
+
+    # Same file as last run — reuse the cached URL, no re-upload.
+    if st.session_state.get(id_key) == uploaded.file_id and st.session_state.get(cache_key):
+        url = st.session_state[cache_key]
+        st.success("✅ Uploaded")
+        st.image(url, use_column_width=True)
+        return url
+
+    # New file (or first time) — actually upload.
+    with st.spinner(f"Uploading {label}…"):
+        try:
+            result = upload_image(uploaded.read(), f"{order_id}_{img_key}")
+            url = result["secure_url"]
+            st.session_state[cache_key] = url
+            st.session_state[id_key]    = uploaded.file_id
+            st.success("✅ Uploaded")
+            st.image(url, use_column_width=True)
+            return url
+        except Exception as e:
+            st.error(f"Upload failed: {e}")
     return None
