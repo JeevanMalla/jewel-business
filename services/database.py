@@ -372,6 +372,28 @@ def flag_stage_needs_changes(order_id, stage_name, notes="", user="Admin"):
     update_production_stage(order_id, stage_name, updates, user)
 
 
+def mark_order_delivered(order_id, user="Admin"):
+    """
+    Jeweller override: skip straight to Delivered regardless of what stage
+    the order is currently sitting in (rush job, walk-in pickup, backfilled
+    historical order, etc). Closes out every remaining stage in one shot.
+    """
+    try:
+        stages = get_order_stages(order_id)
+        if not stages:
+            return
+        now = datetime.now()
+        for s in stages:
+            if s["status"] != "COMPLETED":
+                _col("production_stages").update_one(
+                    {"_id": ObjectId(s["_id"])},
+                    {"$set": {"status": "COMPLETED", "completed_at": now}},
+                )
+        log_production_event(order_id, user, "mark_delivered", "", "Delivered (skipped remaining stages)")
+    except Exception:
+        pass
+
+
 def assign_karigar(order_id, stage_name, karigar_name, user="Admin"):
     update_production_stage(order_id, stage_name, {"assigned_to": karigar_name}, user)
 
