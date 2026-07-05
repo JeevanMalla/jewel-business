@@ -513,10 +513,26 @@ def generate_karigar_pdf(
         ]))
         story += [_section_header("💎 Diamond Specification", styles), t, Spacer(1, 3*mm)]
 
+    # ── Instructions for Karigar ──────────────────────────────────────────────
+    # These are the details a karigar actually needs to understand the job:
+    # what the item is, anything the vendor/jeweller flagged when it was sent
+    # for making, and any other remarks — kept as its own clearly-labelled
+    # section rather than buried as a one-line footnote.
+    instructions = []
+    if e.get("item_desc"):
+        instructions.append(("Item Description", e["item_desc"]))
+    if e.get("vendor_notes"):
+        instructions.append(("Vendor Notes", e["vendor_notes"]))
     if e.get("notes"):
+        instructions.append(("Additional Notes", e["notes"]))
+
+    if instructions:
+        body = "".join(f"<b>{label}:</b> {text}<br/><br/>" for label, text in instructions)
         story += [
-            Paragraph(f"<font size=9><b>Notes:</b> {e['notes']}</font>", styles["Normal"]),
-            Spacer(1, 3*mm),
+            _section_header("📝 Instructions for Karigar", styles),
+            Spacer(1, 2*mm),
+            Paragraph(f"<font size=10>{body}</font>", styles["Normal"]),
+            Spacer(1, 2*mm),
         ]
 
     # ── Reference & progress images ──────────────────────────────────────────
