@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 
-from config.settings import ORDER_STATUSES, GOLD_PURITY, ITEM_TYPES
+from config.settings import ORDER_STATUSES, GOLD_PURITY
 from services.database import (
     get_all_orders, update_order, delete_order, get_order_vendor_summary,
     save_transaction, init_production_pipeline, mark_order_delivered,
@@ -173,71 +173,24 @@ def render():
                         st.rerun()
 
             with edit_tab:
-                st.markdown("#### ✏️ Edit Order Details")
+                st.markdown("#### ✏️ Edit This Order")
                 st.caption(
-                    "Corrects basic info without recalculating pricing. "
-                    "For diamond/gold pricing changes, create a fresh estimate instead."
+                    "Opens the full Estimation builder pre-filled with everything on "
+                    "this order — customer info, gold, and every diamond group — so "
+                    "you can change anything, including diamonds."
                 )
-                with st.form(key=f"edit_form_{oid}"):
-                    ec1, ec2, ec3, ec4 = st.columns(4)
-                    with ec1:
-                        new_customer = st.text_input("Customer Name", value=row["customer"], key=f"edit_cust_{oid}")
-                    with ec2:
-                        new_phone = st.text_input("Phone", value=row["phone"], key=f"edit_phone_{oid}")
-                    with ec3:
-                        cur_item_type = row["item_type"]
-                        idx = ITEM_TYPES.index(cur_item_type) if cur_item_type in ITEM_TYPES else 0
-                        new_item_type = st.selectbox("Item Type", ITEM_TYPES, index=idx, key=f"edit_type_{oid}")
-                    with ec4:
-                        new_item_desc = st.text_input("Item Description", value=row["item_desc"], key=f"edit_desc_{oid}")
-
-                    ec5, ec6 = st.columns(2)
-                    with ec5:
-                        dd_val = dd.date() if pd.notna(dd) else date.today()
-                        new_due_date = st.date_input("Due Date", value=dd_val, key=f"edit_due_{oid}")
-                    with ec6:
-                        new_vendor = st.text_input("Vendor / Supplier", value=row.get("vendor", ""), key=f"edit_vendor_{oid}")
-
-                    new_vendor_notes = st.text_input(
-                        "Vendor Notes", value=row.get("vendor_notes", ""), key=f"edit_vnotes_{oid}",
-                        placeholder="e.g. sent for making on 10 Mar",
+                if st.button("✏️ Edit in Estimation Builder", key=f"edit_est_{oid}", use_container_width=True):
+                    # Use the raw order document (not the cleaned/coerced
+                    # dataframe row) so diamond_rows and every field come
+                    # through exactly as saved, not stringified/rounded.
+                    full_order = next(
+                        (o for o in all_orders if str(o.get("order_id")) == oid),
+                        row.to_dict(),
                     )
-
-                    eg1, eg2, eg3 = st.columns(3)
-                    with eg1:
-                        purity_opts = list(GOLD_PURITY.keys())
-                        cur_purity  = row.get("gold_purity", "")
-                        idx = purity_opts.index(cur_purity) if cur_purity in purity_opts else 0
-                        new_gold_purity = st.selectbox("Gold Purity", purity_opts, index=idx, key=f"edit_purity_{oid}")
-                    with eg2:
-                        color_opts = ["Yellow Gold", "White Gold", "Rose Gold"]
-                        cur_color  = row.get("gold_color", "Yellow Gold")
-                        idx = color_opts.index(cur_color) if cur_color in color_opts else 0
-                        new_gold_color = st.selectbox("Gold Colour", color_opts, index=idx, key=f"edit_color_{oid}")
-                    with eg3:
-                        new_gold_weight = st.number_input(
-                            "Gold Weight (g)", value=float(row.get("gold_wt", 0) or 0),
-                            min_value=0.0, step=0.001, format="%.3f", key=f"edit_wt_{oid}",
-                        )
-
-                    new_notes = st.text_area("Notes / Remarks", value=row.get("notes", ""), key=f"edit_notes_{oid}")
-
-                    if st.form_submit_button("💾 Save Changes", use_container_width=True):
-                        update_order(oid, {
-                            "customer":     new_customer,
-                            "phone":        new_phone,
-                            "item_type":    new_item_type,
-                            "item_desc":    new_item_desc,
-                            "due_date":     str(new_due_date),
-                            "vendor":       new_vendor,
-                            "vendor_notes": new_vendor_notes,
-                            "gold_purity":  new_gold_purity,
-                            "gold_color":   new_gold_color,
-                            "gold_weight":  new_gold_weight,
-                            "notes":        new_notes,
-                        })
-                        st.success("✅ Details updated!")
-                        st.rerun()
+                    st.session_state["editing_order_id"]   = oid
+                    st.session_state["editing_order_data"] = full_order
+                    st.session_state["nav_request"]        = "📋 New Estimation"
+                    st.rerun()
 
             with action_tab:
                 # Convert to Order — only shown for Estimates

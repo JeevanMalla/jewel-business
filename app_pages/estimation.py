@@ -16,10 +16,10 @@ from config.settings import (
     GOLD_PURITY, ITEM_TYPES, DIAMOND_QUALITIES,
     DIAMOND_SHAPES_DEFAULT, CERTIFICATE_TYPES, HALLMARK_TYPES, GST_RATE,
 )
-from services.database import save_order, get_setting, get_all_vendors
+from services.database import save_order, get_setting, get_all_vendors, update_order
 from services.diamond_sheet import get_price, get_sieve_sizes
 from services.pdf_generator import generate_estimation_pdf, generate_invoice_pdf
-from components.image_uploader import render_image_uploader
+from components.image_uploader import render_image_uploader, render_image_gallery
 from services.database import save_transaction
 
 
@@ -36,8 +36,48 @@ def _default_diamond_row(label="Centre Stone"):
 def _init_diamonds():
     if "diamond_rows" not in st.session_state:
         st.session_state.diamond_rows = [
-            _default_diamond_row("Centre Stone")
+            _default_diamond_row("Centre Stone"),
+            _default_diamond_row("Side Diamonds"),
         ]
+
+
+def _reset_to_blank():
+    st.session_state.diamond_rows = [
+        _default_diamond_row("Centre Stone"),
+        _default_diamond_row("Side Diamonds"),
+    ]
+    for k in ("editing_order_id", "editing_order_data", "_loaded_edit_for", "current_order_id"):
+        st.session_state.pop(k, None)
+
+
+def _parse_date(value, fallback):
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except Exception:
+        return fallback
+
+
+def _enter_edit_mode(order_id: str, data: dict):
+    """
+    Loads an existing order's data into the builder — including every
+    diamond group — so it can all be edited in place. Guarded by
+    _loaded_edit_for so this only runs once per order, not on every rerun
+    (otherwise it would keep clobbering in-progress edits).
+    """
+    # Diamond row widgets (and the gold cost field) carry their own keys,
+    # so leftover values from an earlier New Estimation session in this
+    # same browser tab would silently override the loaded order's data.
+    # Clear them first so the widgets re-initialize from `data` below.
+    for k in list(st.session_state.keys()):
+        if k.startswith("d_") or k == "gold_cost_gram":
+            del st.session_state[k]
+
+    st.session_state.diamond_rows = data.get("diamond_rows") or [
+        _default_diamond_row("Centre Stone"),
+        _default_diamond_row("Side Diamonds"),
+    ]
+    st.session_state.current_order_id  = order_id
+    st.session_state["_loaded_edit_for"] = order_id
 
 
 def _render_diamond_rows(shape_dfs, diamond_base):
@@ -143,7 +183,23 @@ def _render_diamond_rows(shape_dfs, diamond_base):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def render(gold_base, diamond_base, shape_dfs):
-    st.markdown("# 📋 New Estimation")
+    editing_order_id = st.session_state.get("editing_order_id")
+    ed = st.session_state.get("editing_order_data") or {} if editing_order_id else {}
+
+    if editing_order_id and st.session_state.get("_loaded_edit_for") != editing_order_id:
+        _enter_edit_mode(editing_order_id, ed)
+
+    if editing_order_id:
+        title_col, cancel_col = st.columns([4, 1])
+        with title_col:
+            st.markdown(f"# ✏️ Edit Order — {editing_order_id}")
+        with cancel_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("❌ Cancel Edit", use_container_width=True):
+                _reset_to_blank()
+                st.rerun()
+    else:
+        st.markdown("# 📋 New Estimation")
     st.markdown("---")
 
     _init_diamonds()
@@ -158,39 +214,54 @@ def render(gold_base, diamond_base, shape_dfs):
         # ── Customer & Order ──────────────────────────────────────────────────
         st.markdown('<div class="gold-header">👤 Customer & Order Info</div>', unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
-        with c1: customer  = st.text_input("Customer Name *")
-        with c2: phone     = st.text_input("Phone")
-        with c3: order_id  = st.text_input("Order ID", value=st.session_state.current_order_id)
-        with c4: item_type = st.selectbox("Item Type", ITEM_TYPES)
+        with c1: customer  = st.text_input("Customer Name *", value=ed.get("customer", ""))
+        with c2: phone     = st.text_input("Phone", value=ed.get("phone", ""))
+        with c3:
+            order_id = st.text_input(
+                "Order ID", value=st.session_state.current_order_id,
+                disabled=bool(editing_order_id),
+            )
+        with c4:
+            it_idx = ITEM_TYPES.index(ed["item_type"]) if ed.get("item_type") in ITEM_TYPES else 0
+            item_type = st.selectbox("Item Type", ITEM_TYPES, index=it_idx)
 
         d1, d2, d3 = st.columns(3)
-        with d1: order_date = st.date_input("Order Date", value=date.today())
-        with d2: due_date   = st.date_input("Due Date")
-        with d3: item_desc  = st.text_input("Item Description", placeholder="e.g. SOL-001 Solitaire Ring")
+        with d1: order_date = st.date_input("Order Date", value=_parse_date(ed.get("order_date"), date.today()))
+        with d2: due_date   = st.date_input("Due Date", value=_parse_date(ed.get("due_date"), date.today()))
+        with d3: item_desc  = st.text_input("Item Description", value=ed.get("item_desc", ""), placeholder="e.g. SOL-001 Solitaire Ring")
 
         # Vendor row
         st.markdown('<div class="gold-header">🏭 Vendor / Supplier</div>', unsafe_allow_html=True)
         vendors      = get_all_vendors()
         vendor_names = ["— None —"] + [v["name"] for v in vendors]
+        vn_idx = vendor_names.index(ed["vendor"]) if ed.get("vendor") in vendor_names else 0
         vn1, vn2 = st.columns(2)
         with vn1:
-            vendor_name = st.selectbox("Assign Vendor / Supplier", vendor_names)
+            vendor_name = st.selectbox("Assign Vendor / Supplier", vendor_names, index=vn_idx)
             vendor_name = "" if vendor_name == "— None —" else vendor_name
         with vn2:
-            vendor_notes = st.text_input("Vendor Notes", placeholder="e.g. sent for making on 10 Mar")
+            vendor_notes = st.text_input("Vendor Notes", value=ed.get("vendor_notes", ""), placeholder="e.g. sent for making on 10 Mar")
 
         st.markdown("---")
 
         # ── Gold ─────────────────────────────────────────────────────────────
         st.markdown('<div class="gold-header">🥇 Gold Details</div>', unsafe_allow_html=True)
         g1, g2, g3, g4, g5, g6, g7 = st.columns(7)
-        with g1: gold_purity_label = st.selectbox("Purity", list(GOLD_PURITY.keys()))
-        with g2: gold_color = st.selectbox("Colour", ["Yellow Gold", "White Gold", "Rose Gold"])
+        with g1:
+            purity_opts = list(GOLD_PURITY.keys())
+            p_idx = purity_opts.index(ed["gold_purity"]) if ed.get("gold_purity") in purity_opts else 0
+            gold_purity_label = st.selectbox("Purity", purity_opts, index=p_idx)
+        with g2:
+            color_opts = ["Yellow Gold", "White Gold", "Rose Gold"]
+            c_idx = color_opts.index(ed["gold_color"]) if ed.get("gold_color") in color_opts else 0
+            gold_color = st.selectbox("Colour", color_opts, index=c_idx)
         pf   = GOLD_PURITY[gold_purity_label]
         gppg = round(gold_base * pf, 2)
         with g3: st.metric("Sell Rate/gram", f"₹ {gppg:,.2f}")
-        with g4: gold_cost_per_gram = st.number_input("Cost Rate/gram (vendor)", value=gppg, step=10.0, key="gold_cost_gram")
-        with g5: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=0.000, step=0.001, format="%.3f")
+        with g4:
+            default_cost_gram = float(ed.get("gold_cost_per_gram", gppg))
+            gold_cost_per_gram = st.number_input("Cost Rate/gram (vendor)", value=default_cost_gram, step=10.0, key="gold_cost_gram")
+        with g5: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=float(ed.get("gold_weight", 5.500)), step=0.001, format="%.3f")
         gold_value      = round(gppg * gold_weight, 0)
         gold_cost_value = round(gold_cost_per_gram * gold_weight, 0)
         with g6: st.metric("Sell Value", f"₹ {gold_value:,.0f}")
@@ -205,7 +276,7 @@ def render(gold_base, diamond_base, shape_dfs):
         with col_add:
             if st.button("➕ Add Diamond Group", use_container_width=True):
                 st.session_state.diamond_rows.append(
-                    _default_diamond_row(f"Group {len(st.session_state.diamond_rows)}")
+                    _default_diamond_row(f"Group {len(st.session_state.diamond_rows) + 1}")
                 )
                 st.rerun()
 
@@ -232,8 +303,8 @@ def render(gold_base, diamond_base, shape_dfs):
         # ── Making ────────────────────────────────────────────────────────────
         st.markdown('<div class="gold-header">🔨 Making Charges</div>', unsafe_allow_html=True)
         m1, m2, m3, m4, m5 = st.columns(5)
-        with m1: making_per_gram = st.number_input("Sell Making ₹/gram", value=1500.0, step=10.0)
-        with m2: making_cost_per_gram = st.number_input("Cost Making ₹/gram (karigar)", value=1000.0, step=10.0)
+        with m1: making_per_gram = st.number_input("Sell Making ₹/gram", value=float(ed.get("making_per_gram", 1500.0)), step=10.0)
+        with m2: making_cost_per_gram = st.number_input("Cost Making ₹/gram (karigar)", value=float(ed.get("making_cost_per_gram", 1000.0)), step=10.0)
         making_value      = round(making_per_gram      * gold_weight, 0)
         making_cost_value = round(making_cost_per_gram * gold_weight, 0)
         m3.metric("Gold Weight",   f"{gold_weight:.3f} g")
@@ -244,16 +315,22 @@ def render(gold_base, diamond_base, shape_dfs):
         # ── Certificate & Hallmark ────────────────────────────────────────────
         st.markdown('<div class="gold-header">📜 Certificate & Hallmark</div>', unsafe_allow_html=True)
         h1, h2, h3, h4, h5, h6, h7, h8 = st.columns(8)
-        with h1: cert_type          = st.selectbox("Certificate",       CERTIFICATE_TYPES)
-        with h2: cert_cost          = st.number_input("Cert Sell ₹",    value=0.0,  step=100.0)
-        with h3: cert_actual_cost   = st.number_input("Cert Actual ₹",  value=0.0,  step=100.0)
-        with h4: hallmark_type      = st.selectbox("Hallmark",          HALLMARK_TYPES)
+        with h1:
+            ct_idx = CERTIFICATE_TYPES.index(ed["cert_type"]) if ed.get("cert_type") in CERTIFICATE_TYPES else 0
+            cert_type          = st.selectbox("Certificate",       CERTIFICATE_TYPES, index=ct_idx)
+        with h2: cert_cost          = st.number_input("Cert Sell ₹",    value=float(ed.get("cert_cost", 0.0)),  step=100.0)
+        with h3: cert_actual_cost   = st.number_input("Cert Actual ₹",  value=float(ed.get("cert_actual_cost", 0.0)),  step=100.0)
+        with h4:
+            ht_idx = HALLMARK_TYPES.index(ed["hallmark_type"]) if ed.get("hallmark_type") in HALLMARK_TYPES else 0
+            hallmark_type      = st.selectbox("Hallmark",          HALLMARK_TYPES, index=ht_idx)
         with h5: hallmark_per       = st.number_input("Sell ₹/article", value=55.0, step=5.0)
-        with h6: hallmark_cost_per  = st.number_input("Cost ₹/article", value=45.0, step=5.0)
+        with h6: hallmark_cost_per  = st.number_input("Cost ₹/article", value=float(ed.get("hallmark_cost_per", 45.0)), step=5.0)
         with h7: hallmark_arts      = st.number_input("Articles",        value=2,    step=1, min_value=0)
         hallmark_value      = round(hallmark_per      * hallmark_arts, 0)
         hallmark_cost_value = round(hallmark_cost_per * hallmark_arts, 0)
         with h8: st.metric("HM Sell / Cost", f"₹{hallmark_value:,.0f} / ₹{hallmark_cost_value:,.0f}")
+        if editing_order_id:
+            st.caption("ℹ️ Hallmark Sell ₹/article and Articles count aren't stored on the order, so they reset to defaults here — only the final Hallmark value/cost carried over. Re-enter them if they differ.")
         st.markdown("---")
 
         # ── Totals ────────────────────────────────────────────────────────────
@@ -286,11 +363,16 @@ def render(gold_base, diamond_base, shape_dfs):
         pc4.metric("Margin %",     f"{profit_pct}%")
 
         st.markdown("---")
-        notes = st.text_area("Notes / Remarks")
+        notes = st.text_area("Notes / Remarks", value=ed.get("notes", ""))
 
     with tab_images:
         st.markdown("### 🖼️ Upload Images")
         st.caption("Item photo · Customer reference · CAD design — stored on Cloudinary.")
+        if editing_order_id and any(ed.get(k) for k in ("item_image", "customer_image", "cad_image")):
+            st.markdown("**Currently Saved**")
+            render_image_gallery(ed)
+            st.markdown("---")
+            st.markdown("**Upload to Replace**")
         st.markdown("---")
         new_imgs = render_image_uploader(order_id, key_prefix="new_est")
         if new_imgs:
@@ -329,27 +411,52 @@ def render(gold_base, diamond_base, shape_dfs):
     b1, b2, b3 = st.columns(3)
 
     with b1:
-        if st.button("💾 Save as Estimate", use_container_width=True):
-            if not customer.strip():
-                st.error("Please enter customer name.")
-            else:
-                img_data = st.session_state.pop("pending_images", {})
-                doc = {
-                    **estimation, "status": "Estimate",
-                    "item_image":     img_data.get("item_image", ""),
-                    "customer_image": img_data.get("customer_image", ""),
-                    "cad_image":      img_data.get("cad_image", ""),
-                }
-                save_order(doc)
+        if editing_order_id:
+            if st.button("💾 Update Order", use_container_width=True):
+                if not customer.strip():
+                    st.error("Please enter customer name.")
+                else:
+                    img_data = st.session_state.pop("pending_images", {})
+                    doc = {
+                        **estimation,
+                        "order_id":       editing_order_id,  # never changes on edit
+                        "item_image":     img_data.get("item_image")     or ed.get("item_image", ""),
+                        "customer_image": img_data.get("customer_image") or ed.get("customer_image", ""),
+                        "cad_image":      img_data.get("cad_image")      or ed.get("cad_image", ""),
+                    }
+                    # Status (Estimate / Pending / In Progress / etc.) is left
+                    # untouched — editing details shouldn't silently revert a
+                    # confirmed order back to "Estimate".
+                    update_order(editing_order_id, doc)
 
-                del st.session_state["current_order_id"]
-                st.session_state.diamond_rows = [
-                    _default_diamond_row("Centre Stone"),
-                ]
-                st.success(
-                    f"✅ Estimate **{order_id}** saved! "
-                    f"Vendor ledger will be updated when you convert to Order."
-                )
+                    _reset_to_blank()
+                    st.session_state["order_search"] = editing_order_id
+                    st.session_state["nav_request"]  = "📦 Orders"
+                    st.success(f"✅ Order **{editing_order_id}** updated!")
+                    st.rerun()
+        else:
+            if st.button("💾 Save as Estimate", use_container_width=True):
+                if not customer.strip():
+                    st.error("Please enter customer name.")
+                else:
+                    img_data = st.session_state.pop("pending_images", {})
+                    doc = {
+                        **estimation, "status": "Estimate",
+                        "item_image":     img_data.get("item_image", ""),
+                        "customer_image": img_data.get("customer_image", ""),
+                        "cad_image":      img_data.get("cad_image", ""),
+                    }
+                    save_order(doc)
+
+                    del st.session_state["current_order_id"]
+                    st.session_state.diamond_rows = [
+                        _default_diamond_row("Centre Stone"),
+                        _default_diamond_row("Side Diamonds"),
+                    ]
+                    st.success(
+                        f"✅ Estimate **{order_id}** saved! "
+                        f"Vendor ledger will be updated when you convert to Order."
+                    )
 
     with b2:
         if st.button("📄 Estimation PDF", use_container_width=True):
