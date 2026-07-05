@@ -260,7 +260,6 @@ def render():
                         # ── Post vendor ledger now that it's a confirmed order ──
                         vendor_name = str(row.get("vendor", "") or "")
                         if vendor_name:
-                            from config.settings import GOLD_PURITY
                             from datetime import datetime as _dt
 
                             gold_wt     = float(row.get("gold_weight", row.get("gold_wt", 0)) or 0)
