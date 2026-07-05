@@ -184,17 +184,18 @@ def render(gold_base, diamond_base, shape_dfs):
 
         # ── Gold ─────────────────────────────────────────────────────────────
         st.markdown('<div class="gold-header">🥇 Gold Details</div>', unsafe_allow_html=True)
-        g1, g2, g3, g4, g5, g6 = st.columns(6)
+        g1, g2, g3, g4, g5, g6, g7 = st.columns(7)
         with g1: gold_purity_label = st.selectbox("Purity", list(GOLD_PURITY.keys()))
+        with g2: gold_color = st.selectbox("Colour", ["Yellow Gold", "White Gold", "Rose Gold"])
         pf   = GOLD_PURITY[gold_purity_label]
         gppg = round(gold_base * pf, 2)
-        with g2: st.metric("Sell Rate/gram", f"₹ {gppg:,.2f}")
-        with g3: gold_cost_per_gram = st.number_input("Cost Rate/gram (vendor)", value=gppg, step=10.0, key="gold_cost_gram")
-        with g4: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=5.500, step=0.001, format="%.3f")
+        with g3: st.metric("Sell Rate/gram", f"₹ {gppg:,.2f}")
+        with g4: gold_cost_per_gram = st.number_input("Cost Rate/gram (vendor)", value=gppg, step=10.0, key="gold_cost_gram")
+        with g5: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=5.500, step=0.001, format="%.3f")
         gold_value      = round(gppg * gold_weight, 0)
         gold_cost_value = round(gold_cost_per_gram * gold_weight, 0)
-        with g5: st.metric("Sell Value", f"₹ {gold_value:,.0f}")
-        with g6: st.metric("Cost Value", f"₹ {gold_cost_value:,.0f}")
+        with g6: st.metric("Sell Value", f"₹ {gold_value:,.0f}")
+        with g7: st.metric("Cost Value", f"₹ {gold_cost_value:,.0f}")
         st.markdown("---")
 
         # ── Diamonds ─────────────────────────────────────────────────────────
@@ -307,7 +308,7 @@ def render(gold_base, diamond_base, shape_dfs):
         order_date=str(order_date), due_date=str(due_date),
         vendor=vendor_name, vendor_notes=vendor_notes,
         # Selling prices
-        gold_purity=gold_purity_label, gold_weight=gold_weight,
+        gold_purity=gold_purity_label, gold_color=gold_color, gold_weight=gold_weight,
         gold_price_gram=gppg, gold_value=gold_value,
         diamond_rows=diamond_rows,
         total_diamond_value=total_diamond_value,
