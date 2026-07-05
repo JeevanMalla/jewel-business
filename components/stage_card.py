@@ -36,9 +36,10 @@ def render_stage_card(stage_doc: dict, order_doc: dict) -> bool:
         st.markdown(
             f'<div style="border-left:4px solid {border};padding:10px 12px;'
             f'margin-bottom:8px;border-radius:6px;background:#fff;'
+            f'color:#000;'
             f'box-shadow:0 1px 3px rgba(0,0,0,0.08)">'
             f'<strong>{oid}</strong> — {order_doc.get("customer", "")}<br>'
-            f'<span style="color:#666;font-size:0.85em">{order_doc.get("item_type", "")}</span><br>'
+            f'<span style="color:#444;font-size:0.85em">{order_doc.get("item_type", "")}</span><br>'
             f'<span style="font-size:0.85em">👤 {stage_doc.get("assigned_to") or "Unassigned"}</span><br>'
             f'<span style="font-size:0.85em">📅 {deadline or "No deadline"}{delay_html}</span>'
             f'</div>',
