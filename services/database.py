@@ -1,11 +1,14 @@
 """
 services/database.py
-All MongoDB operations - orders, prices, settings, transactions, vendors.
+All MongoDB operations - orders, prices, settings, transactions, vendors,
+production tracking.
 """
 import streamlit as st
 from pymongo import MongoClient
 from datetime import datetime
 from bson import ObjectId
+
+from config.settings import PRODUCTION_STAGES
 
 
 # ── Connection ────────────────────────────────────────────────────────────────
@@ -206,3 +209,247 @@ def get_order_vendor_summary(order_id):
             "gold_sent": 0.0, "gold_received": 0.0,
             "net_gold": 0.0, "cash_paid": 0.0, "goods_received": 0,
         }
+
+
+# ── Production Pipeline ───────────────────────────────────────────────────────
+# One doc per (order_id, stage_name) in "production_stages" — 10 per order.
+# Every change to a stage is also logged to "production_events" for audit.
+
+def init_production_pipeline(order_id):
+    """
+    Call once, right when an Estimate is converted into a confirmed Order.
+    Creates the 10 stage docs for the order. Stage 0 (Requirement Received)
+    starts COMPLETED since the order already exists; stage 1 (CAD Design)
+    opens IN_PROGRESS. Safe to call more than once — no-ops if the order
+    already has stages.
+    """
+    try:
+        if _col("production_stages").find_one({"order_id": order_id}):
+            return
+        now  = datetime.now()
+        docs = []
+        for i, stage in enumerate(PRODUCTION_STAGES):
+            docs.append({
+                "order_id":     order_id,
+                "stage_name":   stage,
+                "stage_index":  i,
+                "assigned_to":  "",
+                "status":       "COMPLETED" if i == 0 else ("IN_PROGRESS" if i == 1 else "NOT_STARTED"),
+                "deadline":     None,
+                "completed_at": now if i == 0 else None,
+                "notes":        "",
+                "images":       [],
+            })
+        _col("production_stages").insert_many(docs)
+        log_production_event(order_id, "System", "pipeline_started", "", PRODUCTION_STAGES[1])
+    except Exception:
+        pass
+
+
+def get_order_stages(order_id):
+    """All 10 stage docs for an order, in pipeline order."""
+    try:
+        docs = list(_col("production_stages").find({"order_id": order_id}).sort("stage_index", 1))
+        for d in docs:
+            d["_id"] = str(d["_id"])
+        return docs
+    except Exception:
+        return []
+
+
+def get_current_stage(order_id):
+    """The first non-COMPLETED stage doc, or the last stage if all are done."""
+    stages = get_order_stages(order_id)
+    if not stages:
+        return None
+    for s in stages:
+        if s["status"] != "COMPLETED":
+            return s
+    return stages[-1]
+
+
+def get_all_active_production():
+    """
+    One row per order that has an active (not-yet-Delivered) pipeline —
+    each row is that order's *current* stage doc. This is what the Kanban
+    board and dashboard alerts are built from.
+    """
+    try:
+        pipeline = [
+            {"$match": {"status": {"$ne": "COMPLETED"}}},
+            {"$sort": {"stage_index": 1}},
+            {"$group": {"_id": "$order_id", "stage": {"$first": "$$ROOT"}}},
+        ]
+        rows = list(_col("production_stages").aggregate(pipeline))
+        out  = []
+        for r in rows:
+            s = r["stage"]
+            s["_id"] = str(s["_id"])
+            out.append(s)
+        return out
+    except Exception:
+        return []
+
+
+def update_production_stage(order_id, stage_name, updates, user="Admin"):
+    """
+    Generic field updater for one stage doc. Diffs against the current
+    value for each field and logs a production_events row per change —
+    this is what powers the "Full History" expander.
+    """
+    try:
+        current = _col("production_stages").find_one({"order_id": order_id, "stage_name": stage_name})
+        if not current:
+            return
+        for field, new_val in updates.items():
+            old_val = current.get(field)
+            if old_val != new_val:
+                log_production_event(order_id, user, f"update_{field}", old_val, new_val, stage_name)
+        _col("production_stages").update_one(
+            {"order_id": order_id, "stage_name": stage_name},
+            {"$set": updates},
+        )
+    except Exception:
+        pass
+
+
+def move_stage(order_id, direction, user="Admin"):
+    """
+    direction: "forward" or "backward". No validation blocks this — the
+    jeweller can override the pipeline at any time in either direction.
+    Forward: marks the current stage COMPLETED, opens the next as IN_PROGRESS.
+    Backward: reopens the current stage as NOT_STARTED, re-activates the
+    previous stage as IN_PROGRESS (clearing its completed_at).
+    """
+    try:
+        stages = get_order_stages(order_id)
+        if not stages:
+            return
+        idx = next((i for i, s in enumerate(stages) if s["status"] != "COMPLETED"), len(stages) - 1)
+        now = datetime.now()
+
+        if direction == "forward" and idx == len(stages) - 1:
+            # Last stage (Delivered) — nothing to open next, just close it out.
+            cur = stages[idx]
+            _col("production_stages").update_one(
+                {"_id": ObjectId(cur["_id"])},
+                {"$set": {"status": "COMPLETED", "completed_at": now}},
+            )
+            log_production_event(order_id, user, "move_forward", cur["stage_name"], "— (delivered)")
+
+        elif direction == "forward" and idx < len(stages) - 1:
+            cur, nxt = stages[idx], stages[idx + 1]
+            _col("production_stages").update_one(
+                {"_id": ObjectId(cur["_id"])},
+                {"$set": {"status": "COMPLETED", "completed_at": now}},
+            )
+            _col("production_stages").update_one(
+                {"_id": ObjectId(nxt["_id"])},
+                {"$set": {"status": "IN_PROGRESS"}},
+            )
+            log_production_event(order_id, user, "move_forward", cur["stage_name"], nxt["stage_name"])
+
+        elif direction == "backward" and idx > 0:
+            cur, prev = stages[idx], stages[idx - 1]
+            _col("production_stages").update_one(
+                {"_id": ObjectId(cur["_id"])},
+                {"$set": {"status": "NOT_STARTED"}},
+            )
+            _col("production_stages").update_one(
+                {"_id": ObjectId(prev["_id"])},
+                {"$set": {"status": "IN_PROGRESS", "completed_at": None}},
+            )
+            log_production_event(order_id, user, "move_backward", cur["stage_name"], prev["stage_name"])
+    except Exception:
+        pass
+
+
+def flag_stage_needs_changes(order_id, stage_name, notes="", user="Admin"):
+    """Used for Customer CAD Approval when the customer rejects a design."""
+    updates = {"status": "NEED_CHANGES"}
+    if notes:
+        updates["notes"] = notes
+    update_production_stage(order_id, stage_name, updates, user)
+
+
+def assign_karigar(order_id, stage_name, karigar_name, user="Admin"):
+    update_production_stage(order_id, stage_name, {"assigned_to": karigar_name}, user)
+
+
+def set_stage_deadline(order_id, stage_name, deadline, user="Admin"):
+    update_production_stage(order_id, stage_name, {"deadline": str(deadline)}, user)
+
+
+def add_stage_note(order_id, stage_name, note, user="Admin"):
+    update_production_stage(order_id, stage_name, {"notes": note}, user)
+
+
+def add_stage_image(order_id, stage_name, image_url, user="Admin"):
+    try:
+        stage  = _col("production_stages").find_one({"order_id": order_id, "stage_name": stage_name}) or {}
+        images = stage.get("images", [])
+        images.append(image_url)
+        _col("production_stages").update_one(
+            {"order_id": order_id, "stage_name": stage_name},
+            {"$set": {"images": images}},
+        )
+        log_production_event(order_id, user, "add_image", "", image_url, stage_name)
+    except Exception:
+        pass
+
+
+# ── Production Events (audit trail) ───────────────────────────────────────────
+def log_production_event(order_id, user, action, old_value, new_value, stage_name=""):
+    try:
+        _col("production_events").insert_one({
+            "order_id":   order_id,
+            "stage_name": stage_name,
+            "user":       user,
+            "action":     action,
+            "old_value":  "" if old_value is None else str(old_value),
+            "new_value":  "" if new_value is None else str(new_value),
+            "created_at": datetime.now(),
+        })
+    except Exception:
+        pass
+
+
+def get_production_events(order_id):
+    try:
+        docs = list(_col("production_events").find({"order_id": order_id}).sort("created_at", -1))
+        for d in docs:
+            d["_id"] = str(d["_id"])
+        return docs
+    except Exception:
+        return []
+
+
+# ── Production KPIs (dashboard + Kanban header) ───────────────────────────────
+def get_production_kpis():
+    try:
+        active = get_all_active_production()
+        today  = datetime.now().date()
+
+        delayed = due_today = waiting_approval = 0
+        for s in active:
+            dl = s.get("deadline")
+            if dl:
+                try:
+                    dl_date = datetime.strptime(str(dl)[:10], "%Y-%m-%d").date()
+                    if dl_date < today:
+                        delayed += 1
+                    elif dl_date == today:
+                        due_today += 1
+                except Exception:
+                    pass
+            if s["stage_name"] == "Customer CAD Approval":
+                waiting_approval += 1
+
+        return {
+            "total_active":     len(active),
+            "delayed":          delayed,
+            "due_today":        due_today,
+            "waiting_approval": waiting_approval,
+        }
+    except Exception:
+        return {"total_active": 0, "delayed": 0, "due_today": 0, "waiting_approval": 0}

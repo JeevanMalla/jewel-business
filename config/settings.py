@@ -8,6 +8,25 @@ PAGE_CONFIG = dict(
     initial_sidebar_state="expanded",
 )
 
+PRODUCTION_STAGES = [
+    "Requirement Received",
+    "CAD Design",
+    "Customer CAD Approval",
+    "STL / Wax Creation",
+    "Casting",
+    "Filing",
+    "Stone Setting",
+    "Polishing",
+    "Quality Check",
+    "Delivered",
+]
+
+PRODUCTION_STATUSES = ["NOT_STARTED", "IN_PROGRESS", "COMPLETED", "NEED_CHANGES"]
+
+# Stages surfaced as Kanban columns on the Production page.
+# Add more stage names here any time — the board just gets wider.
+KANBAN_STAGES = ["CAD Design", "STL / Wax Creation", "Casting", "Stone Setting"]
+
 # ── Business constants ────────────────────────────────────────────────────────
 GOLD_PURITY = {
     "24K (99.9%)": 1.000,

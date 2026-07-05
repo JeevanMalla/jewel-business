@@ -98,7 +98,7 @@ def render_timeline(order_id: str, order_doc: dict, user: str = "Admin"):
         label="📷 Stage Progress Photo",
         order_id=order_id,
         img_key=f"stage_{current['stage_name']}",
-        widget_key=f"stage_img_{order_id}",
+        widget_key=f"stage_img_{order_id}_{current['stage_name']}",
     )
     if img_url:
         add_stage_image(order_id, current["stage_name"], img_url, user)

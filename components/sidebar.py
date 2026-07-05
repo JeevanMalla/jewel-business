@@ -7,6 +7,13 @@ from services.database import get_prices, save_prices
 
 
 def render_sidebar():
+    # Let other pages request a tab switch (e.g. the "Open Production"
+    # button on Orders) without touching the radio's own session_state
+    # key after it's already been instantiated this run — Streamlit
+    # raises StreamlitAPIException if you do that directly.
+    if st.session_state.get("nav_request"):
+        st.session_state["nav_radio"] = st.session_state.pop("nav_request")
+
     live      = get_prices()
     shape_dfs = {}
 
@@ -17,8 +24,9 @@ def render_sidebar():
         page = st.radio(
             "Navigation",
             ["🏠 Dashboard", "📋 New Estimation", "📦 Orders",
-             "💰 Finance", "⚙️ Settings"],
+             "🏭 Production", "💰 Finance", "⚙️ Settings"],
             label_visibility="collapsed",
+            key="nav_radio",
         )
         st.markdown("---")
 

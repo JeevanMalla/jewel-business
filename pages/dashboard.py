@@ -7,6 +7,7 @@ import pandas as pd
 from datetime import date
 
 from services.database import get_setting, get_all_orders
+from services.database import get_production_kpis, get_all_active_production
 
 
 def render():
@@ -14,6 +15,27 @@ def render():
     st.markdown(f"# 🏠 {bname}")
     st.caption(pd.Timestamp.now().strftime("%A, %d %B %Y"))
     st.markdown("---")
+    # ── Production alerts (shown first, above everything else) ────────────────
+    kpis = get_production_kpis()
+    if kpis["delayed"] or kpis["waiting_approval"] or kpis["due_today"]:
+        st.markdown("### 🏭 Production Alerts")
+        a1, a2, a3 = st.columns(3)
+        if kpis["delayed"]:
+            a1.error(f"⚠️ {kpis['delayed']} stage(s) overdue")
+        if kpis["waiting_approval"]:
+            a2.warning(f"⏳ {kpis['waiting_approval']} awaiting CAD approval")
+        if kpis["due_today"]:
+            a3.info(f"📅 {kpis['due_today']} due today")
+
+        qc_waiting = [
+            s for s in get_all_active_production()
+            if s["stage_name"] == "Quality Check"
+        ]
+        if qc_waiting:
+            st.warning(f"🔍 {len(qc_waiting)} order(s) waiting on Quality Check")
+
+        st.markdown("---")
+    
 
     all_orders = get_all_orders()
     print(all_orders)
