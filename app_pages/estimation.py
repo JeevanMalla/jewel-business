@@ -202,11 +202,11 @@ def render(gold_base, diamond_base, shape_dfs):
         st.markdown('<div class="gold-header">💎 Diamond Details</div>', unsafe_allow_html=True)
         diamond_rows = _render_diamond_rows(shape_dfs, diamond_base)
 
-        col_add, col_summary = st.columns([1, 2])
+        col_add, col_summary = st.columns([1, 3])
         with col_add:
             if st.button("➕ Add Diamond Group", use_container_width=True):
                 st.session_state.diamond_rows.append(
-                    _default_diamond_row(f"Group {len(st.session_state.diamond_rows) + 1}")
+                    _default_diamond_row(f"Group {len(st.session_state.diamond_rows)}")
                 )
                 st.rerun()
 
@@ -346,7 +346,6 @@ def render(gold_base, diamond_base, shape_dfs):
                 del st.session_state["current_order_id"]
                 st.session_state.diamond_rows = [
                     _default_diamond_row("Centre Stone"),
-                    _default_diamond_row("Side Diamonds"),
                 ]
                 st.success(
                     f"✅ Estimate **{order_id}** saved! "
