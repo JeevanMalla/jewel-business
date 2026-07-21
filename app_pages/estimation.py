@@ -48,7 +48,8 @@ def _reset_to_blank():
         _default_diamond_row("Centre Stone"),
         _default_diamond_row("Side Diamonds"),
     ]
-    for k in ("editing_order_id", "editing_order_data", "_loaded_edit_for", "current_order_id"):
+    for k in ("editing_order_id", "editing_order_data", "_loaded_edit_for",
+              "current_order_id", "gold_cost_gram", "_gold_cost_purity"):
         st.session_state.pop(k, None)
 
 
@@ -71,7 +72,7 @@ def _enter_edit_mode(order_id: str, data: dict):
     # same browser tab would silently override the loaded order's data.
     # Clear them first so the widgets re-initialize from `data` below.
     for k in list(st.session_state.keys()):
-        if k.startswith("d_") or k == "gold_cost_gram":
+        if k.startswith("d_") or k in ("gold_cost_gram", "_gold_cost_purity"):
             del st.session_state[k]
 
     st.session_state.diamond_rows = data.get("diamond_rows") or [
@@ -276,8 +277,25 @@ def render(gold_base, diamond_base, shape_dfs):
         gppg = round(gold_base * pf, 2)
         with g3: st.metric("Sell Rate/gram", f"₹ {gppg:,.2f}")
         with g4:
+            # The cost input carries a fixed widget key, so once it exists
+            # session_state wins and `value=` is ignored. Without re-basing it
+            # here, picking 24K first and then switching to 18K left the cost
+            # rate sitting at the 24K figure while the sell rate followed the
+            # purity — the vendor cost was being charged at 24K for an 18K
+            # item. Re-base on an actual purity change only, so a manual
+            # override survives every other rerun.
+            prev_purity = st.session_state.get("_gold_cost_purity")
+            if prev_purity is not None and prev_purity != gold_purity_label:
+                st.session_state["gold_cost_gram"] = gppg
+            st.session_state["_gold_cost_purity"] = gold_purity_label
+
             default_cost_gram = float(ed.get("gold_cost_per_gram", gppg))
-            gold_cost_per_gram = st.number_input("Cost Rate/gram (vendor)", value=default_cost_gram, step=10.0, key="gold_cost_gram")
+            gold_cost_per_gram = st.number_input(
+                "Cost Rate/gram (vendor)", value=default_cost_gram,
+                step=10.0, key="gold_cost_gram",
+                help=f"Defaults to the {gold_purity_label} rate. Edit to set the "
+                     f"actual rate your vendor charges.",
+            )
         with g5: gold_weight = st.number_input("Weight (grams)", min_value=0.0, value=float(ed.get("gold_weight", 5.500)), step=0.001, format="%.3f")
         gold_value      = round(gppg * gold_weight, 0)
         gold_cost_value = round(gold_cost_per_gram * gold_weight, 0)
