@@ -350,7 +350,7 @@ def render(gold_base, diamond_base, shape_dfs):
             <p>Gold ₹{gold_value:,.0f} &nbsp;+&nbsp; Diamonds ₹{total_diamond_value:,.0f}
                &nbsp;+&nbsp; Making ₹{making_value:,.0f}
                &nbsp;+&nbsp; Others ₹{cert_cost + hallmark_value:,.0f}</p>
-            <p>Net ₹{net_amount:,.0f} &nbsp;|&nbsp; GST 3% ₹{gst_amount:,.0f}</p>
+            <p>Net ₹{net_amount:,.0f} &nbsp;|&nbsp; GST {GST_RATE * 100:g}% ₹{gst_amount:,.0f}</p>
             <h1>₹ {gross_amount:,.0f}</h1>
             <p>Gross Amount (incl. GST) · <i>Estimated — may vary on final CAD</i></p>
         </div>

@@ -62,7 +62,11 @@ DIAMOND_SHAPES_DEFAULT = [
 CERTIFICATE_TYPES = ["None", "IGI", "GIA","SGL"]
 HALLMARK_TYPES    = ["HUID", "BIS", "None"]
 
-GST_RATE = 0.00   # 3% standard for gold jewellery in India
+# Single source of truth for tax. Both the on-screen totals and the PDF
+# tax lines (GST, and the CGST/SGST split on invoices) are derived from
+# this, so net + tax always equals gross.
+# Set to 0.03 for the standard 3% on gold jewellery in India.
+GST_RATE = 0.00
 
 # ── Google Sheet column aliases ───────────────────────────────────────────────
 # Handles slight header variations in your diamond price sheet

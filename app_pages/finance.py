@@ -59,6 +59,12 @@ def render(gold_base):
     st.markdown("# 💰 Finance & Ledger")
     st.markdown("---")
 
+    # Streamlit executes all seven tab bodies on every rerun, so each of these
+    # was being read three times per interaction. Fetch once and share.
+    all_orders_cached  = get_all_orders()
+    all_txns_cached    = get_transactions()
+    all_vendors_cached = get_all_vendors()
+
     (tab_txn, tab_order_vendor, tab_customer,
      tab_vendor, tab_cash, tab_pnl, tab_vendors) = st.tabs([
         "📝 Add Transaction",
@@ -83,7 +89,7 @@ def render(gold_base):
                                   horizontal=True, key="txn_pt")
             pt = "customer" if party_type == "Customer" else "vendor"
 
-            vendors      = get_all_vendors()
+            vendors      = all_vendors_cached
             vendor_names = [v["name"] for v in vendors]
             if pt == "vendor" and vendor_names:
                 party_name = st.selectbox("Select Vendor", vendor_names, key="txn_vsel")
@@ -146,11 +152,14 @@ def render(gold_base):
                     order_ref=order_ref.strip(), notes=notes.strip(),
                 ))
                 st.success(f"✅ Saved for **{party_name}**!")
+                # Rerun so the hoisted transaction list picks up this entry —
+                # every other mutation on this page already does the same.
+                st.rerun()
 
         # Recent
         st.markdown("---")
         st.markdown("### 🕐 Recent Transactions")
-        recent = get_transactions()
+        recent = all_txns_cached
         if recent:
             rdf = _txn_df(recent).head(20)
             show = [c for c in ["date","party_name","party_type","mode",
@@ -182,8 +191,8 @@ def render(gold_base):
         st.markdown("### 🔗 Order Vendor Tracker")
         st.caption("Track gold sent/received and cash paid to vendor per order.")
 
-        orders       = get_all_orders()
-        vendors      = get_all_vendors()
+        orders       = all_orders_cached
+        vendors      = all_vendors_cached
         vendor_names = [v["name"] for v in vendors]
 
         if not orders:
@@ -344,13 +353,13 @@ def render(gold_base):
                               txn_count=("cash_amount","count"))
                          .reset_index())
 
-            orders = get_all_orders()
+            orders = all_orders_cached
             order_totals = {}
             if orders:
                 odf = pd.DataFrame(orders)
-                if "customer" in odf.columns and "gross" in odf.columns:
-                    odf["gross"] = pd.to_numeric(odf["gross"], errors="coerce").fillna(0)
-                    order_totals = odf.groupby("customer")["gross"].sum().to_dict()
+                if "customer" in odf.columns and "gross_amount" in odf.columns:
+                    odf["gross_amount"] = pd.to_numeric(odf["gross_amount"], errors="coerce").fillna(0)
+                    order_totals = odf.groupby("customer")["gross_amount"].sum().to_dict()
 
             for _, row in summary.iterrows():
                 name      = row["party_name"]
@@ -431,7 +440,7 @@ def render(gold_base):
     # ══════════════════════════════════════════════════════════════════════════
     with tab_cash:
         st.markdown("### 💵 Cash Flow Summary")
-        all_txns = get_transactions()
+        all_txns = all_txns_cached
         if not all_txns:
             st.info("No transactions yet.")
         else:
@@ -496,8 +505,8 @@ def render(gold_base):
         st.markdown("### 📊 P&L per Order")
         st.caption("Line-by-line cost vs selling price breakdown per order.")
 
-        orders   = get_all_orders()
-        all_txns = get_transactions()
+        orders   = all_orders_cached
+        all_txns = all_txns_cached
 
         if not orders:
             st.info("No orders yet.")
@@ -507,7 +516,7 @@ def render(gold_base):
                 if c not in odf.columns: odf[c] = ""
                 odf[c] = odf[c].astype(str).replace("nan","")
 
-            num_cols = ["gross","net_amount","gold_value","gold_cost_value",
+            num_cols = ["gross_amount","net_amount","gold_value","gold_cost_value",
                         "total_diamond_value","total_diamond_cost",
                         "making_value","making_cost_value",
                         "cert_cost","cert_actual_cost",
@@ -528,7 +537,7 @@ def render(gold_base):
             summary_rows = []
             for _, o in odf.iterrows():
                 oid      = o["order_id"]
-                billed   = _safe_float(o.get("gross", 0))
+                billed   = _safe_float(o.get("gross_amount", 0))
                 received = _safe_float(txn_map.get(oid, 0))
                 cost     = _safe_float(o.get("total_cost", 0))
                 profit   = _safe_float(o.get("total_profit", 0))
@@ -556,7 +565,7 @@ def render(gold_base):
             total_sell    = odf["net_amount"].sum()
             total_cost    = odf["total_cost"].sum()
             total_profit  = odf["total_profit"].sum()
-            total_billed  = odf["gross"].sum()
+            total_billed  = odf["gross_amount"].sum()
             total_recv    = sum(txn_map.values()) if txn_map else 0
             avg_margin    = round((total_profit / total_sell * 100), 1) if total_sell > 0 else 0
 
@@ -676,7 +685,7 @@ def render(gold_base):
                     st.rerun()
 
         st.markdown("---")
-        vendors = get_all_vendors()
+        vendors = all_vendors_cached
         if not vendors:
             st.info("No vendors added yet.")
         else:

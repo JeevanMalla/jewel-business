@@ -8,9 +8,10 @@ from datetime import date
 
 from config.settings import ORDER_STATUSES, GOLD_PURITY
 from services.database import (
-    get_all_orders, update_order, delete_order, get_order_vendor_summary,
+    get_all_orders, update_order, delete_order,
     save_transaction, init_production_pipeline, mark_order_delivered,
-    get_setting, get_order_stages,
+    get_setting, get_vendor_summaries, get_stages_for_orders,
+    EMPTY_VENDOR_SUMMARY,
     get_all_estimates, update_estimate, delete_estimate, convert_estimate_to_order,
 )
 from services.pdf_generator import generate_karigar_pdf
@@ -31,9 +32,11 @@ def _safe_df(all_orders):
         df[c] = df[c].astype(str)
         df[c] = df[c].replace("nan", "").replace("None", "")
 
-    # Numeric columns - add if missing, coerce to float
-    for c in ["gross", "net_amount", "gst", "gold_wt",
-              "diamond_tcw", "diamond_pcs"]:
+    # Numeric columns - add if missing, coerce to float.
+    # These must match exactly what estimation.py writes; a name that is read
+    # here but never written silently renders as 0.0 rather than erroring.
+    for c in ["gross_amount", "net_amount", "gst_amount", "gold_weight",
+              "total_tcw", "total_pcs"]:
         if c not in df.columns:
             df[c] = 0.0
         else:
@@ -104,9 +107,18 @@ def render():
     st.markdown(f"**{len(fdf)} order(s) found**")
     st.markdown("---")
 
+    # Streamlit runs every expander and tab body on each rerun, so anything
+    # queried per-card multiplies by the number of orders on screen. Fetch
+    # vendor summaries and production stages for the whole visible page in
+    # two queries, then index into them inside the loop.
+    visible_ids     = [str(o) for o in fdf["order_id"].tolist()]
+    vendor_summaries = get_vendor_summaries(visible_ids)
+    stages_by_order  = get_stages_for_orders(visible_ids)
+
     # ── Order cards ───────────────────────────────────────────────────────────
     for _, row in fdf.iterrows():
         oid = str(row["order_id"])
+        vs  = vendor_summaries.get(oid, EMPTY_VENDOR_SUMMARY)
 
         is_estimate = str(row.get("status","")) == "Estimate"
         badge = "📋 ESTIMATE  " if is_estimate else "🔖 "
@@ -115,7 +127,7 @@ def render():
         with st.expander(
             f"{badge}{oid}  —  {row['customer']}  |  "
             f"{row['item_type']}  |  "
-            f"₹{row['gross']:,.0f}  |  **{row['status']}**",
+            f"₹{row['gross_amount']:,.0f}  |  **{row['status']}**",
             expanded=deep_linked,
         ):
             detail_tab, vendor_tab, image_tab, edit_tab, action_tab = st.tabs(
@@ -134,17 +146,16 @@ def render():
                     dd = row["due_date"]
                     st.markdown(f"**Order Date:** {od.strftime('%d %b %Y') if pd.notna(od) else '—'}")
                     st.markdown(f"**Due Date:**   {dd.strftime('%d %b %Y') if pd.notna(dd) else '—'}")
-                    st.markdown(f"**Gold:** {row['gold_purity']} · {row['gold_wt']}g")
-                    st.markdown(f"**Diamond:** {row['diamond_pcs']} pcs · {row['diamond_tcw']} ct")
+                    st.markdown(f"**Gold:** {row['gold_purity']} · {row['gold_weight']}g")
+                    st.markdown(f"**Diamond:** {row['total_pcs']} pcs · {row['total_tcw']} ct")
                 with dc3:
                     st.markdown(f"**Net:** ₹{row['net_amount']:,.0f}")
-                    st.markdown(f"**GST:** ₹{row['gst']:,.0f}")
-                    st.markdown(f"**Gross:** ₹{row['gross']:,.0f}")
+                    st.markdown(f"**GST:** ₹{row['gst_amount']:,.0f}")
+                    st.markdown(f"**Gross:** ₹{row['gross_amount']:,.0f}")
                     if row["notes"]:
                         st.markdown(f"**Notes:** {row['notes']}")
 
-                # Vendor gold summary
-                vs = get_order_vendor_summary(oid)
+                # Vendor gold summary (from the bulk fetch above)
                 if vs["gold_sent"] > 0 or vs["gold_received"] > 0 or vs["cash_paid"] > 0:
                     st.markdown("---")
                     st.markdown("**🏭 Vendor Activity**")
@@ -162,6 +173,7 @@ def render():
                     order_id   = oid,
                     vendor_name= str(row.get("vendor", "") or ""),
                     order_doc  = row.to_dict(),
+                    summary    = vs,
                 )
 
             with image_tab:
@@ -222,7 +234,7 @@ def render():
                         # ── Post vendor ledger now that it's a confirmed order ──
                         vendor_name = str(row.get("vendor", "") or "")
                         if vendor_name:
-                            gold_wt     = float(row.get("gold_weight", row.get("gold_wt", 0)) or 0)
+                            gold_wt     = float(row.get("gold_weight", 0) or 0)
                             gold_purity = str(row.get("gold_purity", "24K (99.9%)"))
                             pf          = GOLD_PURITY.get(gold_purity, 1.0)
                             gold_base   = float(row.get("gold_price_gram", 0) or 0) / pf if pf > 0 else 0
@@ -327,11 +339,11 @@ def render():
                 st.markdown("---")
                 st.markdown("**📄 Karigar Work Order**")
                 st.caption("Gold/diamond specs + reference images only — no prices, no GST.")
+                # row already carries the real gold_weight — don't overwrite it.
                 karigar_doc = row.to_dict()
                 karigar_doc["due_date"]     = dd.strftime("%d %b %Y") if pd.notna(dd) else "—"
-                karigar_doc["gold_weight"]  = row.get("gold_wt", 0)
                 stage_imgs = []
-                for s in get_order_stages(oid):
+                for s in stages_by_order.get(oid, []):
                     stage_imgs.extend(s.get("images", []))
                 karigar_doc["stage_images"] = stage_imgs
 

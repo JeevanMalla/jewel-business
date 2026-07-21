@@ -20,6 +20,8 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 
+from config.settings import GST_RATE
+
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 GOLD  = colors.HexColor("#d4a843")
@@ -238,23 +240,43 @@ def _build_making_others(e: dict, styles) -> list:
     ]
 
 
-def _build_totals_table(e: dict, styles, show_tax_split: bool = False) -> list:
+def _build_totals_table(e: dict, styles, show_tax_split: bool = False,
+                        gst_rate: float | None = None) -> list:
     """
-    show_tax_split=False → single GST 3% line  (estimation)
-    show_tax_split=True  → CGST 1.5% + SGST 1.5% split  (invoice)
+    show_tax_split=False → single "GST @ x%" line          (estimation)
+    show_tax_split=True  → CGST x/2% + SGST x/2% split      (invoice)
+
+    The rate comes from config.settings.GST_RATE unless overridden. It used to
+    be hardcoded at 3% here while GST_RATE was 0.00, so the invoice printed
+    real CGST/SGST amounts that were not included in gross_amount and the
+    document did not add up. Deriving both the label and the amounts from one
+    rate keeps net + tax == gross by construction.
     """
     net = e["net_amount"]
     gst = e["gst_amount"]
 
+    # Derive the printed percentage from this document's own figures so the
+    # label can never contradict the amount beside it — an order priced at a
+    # historical rate still prints the rate it was actually charged at. Falls
+    # back to the configured rate only when there's no net to divide by.
+    if gst_rate is not None:
+        rate = gst_rate
+    elif net:
+        rate = gst / net
+    else:
+        rate = GST_RATE
+
+    # gst_amount is rounded to whole rupees, so dividing it back out gives a
+    # rate like 2.99994% — round the *displayed* percentage to 2 dp.
     if show_tax_split:
-        cgst = round(net * 0.015, 0)
-        sgst = round(net * 0.015, 0)
+        half = round(gst / 2, 0)
+        pct  = round(rate * 100 / 2, 2)
         tax_rows = [
-            [f"CGST @ 1.5%  (HSN 7113)", f"₹ {cgst:,.0f}"],
-            [f"SGST @ 1.5%  (HSN 7113)", f"₹ {sgst:,.0f}"],
+            [f"CGST @ {pct:g}%  (HSN 7113)", f"₹ {half:,.0f}"],
+            [f"SGST @ {pct:g}%  (HSN 7113)", f"₹ {gst - half:,.0f}"],
         ]
     else:
-        tax_rows = [["GST @ 3%", f"₹ {gst:,.0f}"]]
+        tax_rows = [[f"GST @ {round(rate * 100, 2):g}%", f"₹ {gst:,.0f}"]]
 
     rows = (
         [["Net Amount", f"₹ {net:,.0f}"]]
@@ -473,7 +495,7 @@ def generate_karigar_pdf(
 
     # ── Gold specification (weight/purity/colour only — no rate, no value) ──
     gold_color = e.get("gold_color", "Yellow Gold")
-    gold_wt    = float(e.get("gold_weight", e.get("gold_wt", 0)) or 0)
+    gold_wt    = float(e.get("gold_weight", 0) or 0)
     story += [
         _section_header("🥇 Gold Specification", styles),
         _data_table([

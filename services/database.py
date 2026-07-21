@@ -145,7 +145,39 @@ def get_db():
         raise DatabaseError(_humanize(exc)) from exc
 
     _migrate_estimates_out_of_orders(db)
+    _ensure_indexes(db)
     return db
+
+
+def _ensure_indexes(db):
+    """
+    Every query in this module filters by order_id, party_name, status or
+    stage_name — none of which were indexed, so each lookup was a full
+    collection scan. create_index is idempotent, so this is safe to run on
+    every connect and is a no-op once the indexes exist.
+
+    order_id is unique on both `estimates` and `orders`: it is the business
+    key that update_order/convert_estimate_to_order match on, so a duplicate
+    would silently cross-write two customers' orders.
+    """
+    try:
+        db["estimates"].create_index("order_id", unique=True)
+        db["orders"].create_index("order_id", unique=True)
+        db["orders"].create_index("status")
+        db["orders"].create_index([("created_at", -1)])
+        db["production_stages"].create_index([("order_id", 1), ("stage_index", 1)])
+        db["production_stages"].create_index("status")
+        db["production_events"].create_index([("order_id", 1), ("created_at", -1)])
+        db["order_vendor_txns"].create_index([("order_id", 1), ("date", -1)])
+        db["transactions"].create_index([("party_name", 1), ("party_type", 1)])
+        db["transactions"].create_index([("date", -1)])
+        db["vendors"].create_index("name")
+        db["settings"].create_index("key")
+    except Exception as exc:
+        # A duplicate order_id in legacy data will make the unique index fail.
+        # That must not stop the app from opening — surface it in the banner
+        # and carry on with whatever indexes did get created.
+        _record_db_error("_ensure_indexes", exc)
 
 
 def _col(name):
@@ -415,6 +447,69 @@ _EMPTY_VENDOR_SUMMARY = {
     "gold_sent": 0.0, "gold_received": 0.0,
     "net_gold": 0.0, "cash_paid": 0.0, "goods_received": 0,
 }
+
+# Public alias — pages use this as the default for an order with no vendor
+# activity when reading from the bulk get_vendor_summaries() map.
+EMPTY_VENDOR_SUMMARY = _EMPTY_VENDOR_SUMMARY
+
+
+@_safe_read(dict)
+def get_vendor_summaries(order_ids):
+    """
+    Bulk form of get_order_vendor_summary: one aggregation for many orders
+    instead of one query each. Returns {order_id: summary}; callers should
+    use `.get(oid, dict(_EMPTY_VENDOR_SUMMARY))` for orders with no activity.
+
+    The Orders page renders one card per order and Streamlit executes every
+    expander and tab body on every rerun, so the per-order version turned a
+    single page into O(N) round-trips per keystroke.
+    """
+    order_ids = list(order_ids)
+    if not order_ids:
+        return {}
+    rows = _col("order_vendor_txns").aggregate([
+        {"$match": {"order_id": {"$in": order_ids}}},
+        {"$group": {
+            "_id": {"order_id": "$order_id", "txn_type": "$txn_type"},
+            "gold":  {"$sum": {"$ifNull": ["$gold_grams",  0]}},
+            "cash":  {"$sum": {"$ifNull": ["$cash_amount", 0]}},
+            "count": {"$sum": 1},
+        }},
+    ])
+    out = {}
+    for r in rows:
+        oid      = r["_id"]["order_id"]
+        txn_type = r["_id"]["txn_type"]
+        s = out.setdefault(oid, dict(_EMPTY_VENDOR_SUMMARY))
+        if txn_type == "gold_sent":
+            s["gold_sent"]      = float(r["gold"] or 0)
+        elif txn_type == "gold_received":
+            s["gold_received"]  = float(r["gold"] or 0)
+        elif txn_type == "cash_paid":
+            s["cash_paid"]      = float(r["cash"] or 0)
+        elif txn_type == "goods_received":
+            s["goods_received"] = int(r["count"])
+    for s in out.values():
+        s["net_gold"] = s["gold_sent"] - s["gold_received"]
+    return out
+
+
+@_safe_read(dict)
+def get_stages_for_orders(order_ids):
+    """
+    Bulk form of get_order_stages. Returns {order_id: [stage docs in order]}.
+    """
+    order_ids = list(order_ids)
+    if not order_ids:
+        return {}
+    docs = _col("production_stages").find(
+        {"order_id": {"$in": order_ids}}
+    ).sort([("order_id", 1), ("stage_index", 1)])
+    out = {}
+    for d in docs:
+        d["_id"] = str(d["_id"])
+        out.setdefault(d["order_id"], []).append(d)
+    return out
 
 
 @_safe_read(lambda: dict(_EMPTY_VENDOR_SUMMARY))

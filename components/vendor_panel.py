@@ -28,7 +28,8 @@ TXN_TYPE_LABELS = {
 }
 
 
-def render_vendor_panel(order_id: str, vendor_name: str, order_doc: dict):
+def render_vendor_panel(order_id: str, vendor_name: str, order_doc: dict,
+                        summary: dict | None = None):
     """
     Full vendor panel for one order.
     Shows cost summary, transaction history, and add-transaction form.
@@ -36,6 +37,10 @@ def render_vendor_panel(order_id: str, vendor_name: str, order_doc: dict):
     order_doc must contain:
       gold_weight, making_value, total_diamond_value,
       cert_cost, hallmark_value, gold_price_gram, vendor
+
+    summary: optional pre-computed vendor summary (from the bulk
+      get_vendor_summaries()). Pass it when rendering many orders at once to
+      avoid re-querying per card; omit it and the panel fetches its own.
     """
     if not vendor_name:
         st.caption("No vendor assigned to this order.")
@@ -45,7 +50,7 @@ def render_vendor_panel(order_id: str, vendor_name: str, order_doc: dict):
     st.markdown("---")
 
     # ── Cost summary from estimation ──────────────────────────────────────────
-    gold_wt        = float(order_doc.get("gold_weight",      order_doc.get("gold_wt", 0)) or 0)
+    gold_wt        = float(order_doc.get("gold_weight", 0) or 0)
     gold_rate      = float(order_doc.get("gold_price_gram",   0) or 0)
     gold_purity    = str(order_doc.get("gold_purity",         "24K (99.9%)"))
     # Purity factors come from GOLD_PURITY so the ledger can never disagree
@@ -74,7 +79,8 @@ def render_vendor_panel(order_id: str, vendor_name: str, order_doc: dict):
     col5.metric("Total Payable",   f"₹ {total_payable:,.0f}")
 
     # ── Transaction summary ───────────────────────────────────────────────────
-    summary = get_order_vendor_summary(order_id)
+    if summary is None:
+        summary = get_order_vendor_summary(order_id)
     st.markdown("#### 📊 Transaction Summary")
     s1, s2, s3, s4, s5 = st.columns(5)
     s1.metric("Gold Sent",        f"{summary['gold_sent']:.3f} g")

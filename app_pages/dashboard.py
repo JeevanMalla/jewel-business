@@ -60,7 +60,7 @@ def render():
             df[c] = ""
         df[c] = df[c].astype(str).replace("nan", "").replace("None", "")
 
-    num_cols = ["gross", "net_amount", "gst", "total_profit", "profit_pct"]
+    num_cols = ["gross_amount", "net_amount", "gst_amount", "total_profit", "profit_pct"]
     for c in num_cols:
         if c not in df.columns:
             df[c] = 0.0
@@ -98,7 +98,7 @@ def render():
 
     # Revenue + profit this month
     valid_month = df["order_date"].notna() & (df["order_date"].dt.month == this_mo)
-    rev_mo    = df.loc[valid_month, "gross"].sum()
+    rev_mo    = df.loc[valid_month, "gross_amount"].sum()
     profit_mo = df.loc[valid_month, "total_profit"].sum()
 
     r1, r2 = st.columns(2)
@@ -135,13 +135,14 @@ def render():
 
     with left:
         st.markdown("### 📋 Recent Orders")
-        show = [c for c in ["order_id", "customer", "item_type", "status", "due_date", "gross"]
+        show = [c for c in ["order_id", "customer", "item_type", "status", "due_date", "gross_amount"]
                 if c in df.columns]
-        recent = df[df["status"] != "Estimate"].head(10)[show].copy()
+        recent = df.head(10)[show].copy()
         if "due_date" in recent.columns:
             recent["due_date"] = recent["due_date"].dt.strftime("%d %b %Y").fillna("—")
-        if "gross" in recent.columns:
-            recent["gross"] = recent["gross"].apply(lambda x: f"₹{x:,.0f}")
+        if "gross_amount" in recent.columns:
+            recent["gross_amount"] = recent["gross_amount"].apply(lambda x: f"₹{x:,.0f}")
+        recent = recent.rename(columns={"gross_amount": "gross"})
         st.dataframe(recent, use_container_width=True, hide_index=True)
 
     with right:
