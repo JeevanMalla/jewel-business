@@ -227,10 +227,25 @@ def render(gold_base, diamond_base, shape_dfs):
             it_idx = ITEM_TYPES.index(ed["item_type"]) if ed.get("item_type") in ITEM_TYPES else 0
             item_type = st.selectbox("Item Type", ITEM_TYPES, index=it_idx)
 
-        d1, d2, d3 = st.columns(3)
+        # A quote has a date, but not a delivery promise — the due date is set
+        # when the estimate is converted into a real order. This builder is
+        # also the editor for confirmed orders though, so keep the field there
+        # or editing an order would wipe the date it was promised on.
+        editing_confirmed_order = bool(editing_order_id) and str(ed.get("status", "")) != "Estimate"
+
+        if editing_confirmed_order:
+            d1, d2, d3 = st.columns(3)
+            with d2:
+                due_date = st.date_input("Due Date", value=_parse_date(ed.get("due_date"), date.today()))
+        else:
+            d1, d3 = st.columns(2)
+            due_date = None
+
         with d1: order_date = st.date_input("Order Date", value=_parse_date(ed.get("order_date"), date.today()))
-        with d2: due_date   = st.date_input("Due Date", value=_parse_date(ed.get("due_date"), date.today()))
         with d3: item_desc  = st.text_input("Item Description", value=ed.get("item_desc", ""), placeholder="e.g. SOL-001 Solitaire Ring")
+
+        if not editing_confirmed_order:
+            st.caption("📅 The delivery due date is set when you convert this estimate into an order.")
 
         # Vendor row
         st.markdown('<div class="gold-header">🏭 Vendor / Supplier</div>', unsafe_allow_html=True)
@@ -388,7 +403,7 @@ def render(gold_base, diamond_base, shape_dfs):
     estimation = dict(
         order_id=order_id, customer=customer, phone=phone,
         item_desc=item_desc, item_type=item_type,
-        order_date=str(order_date), due_date=str(due_date),
+        order_date=str(order_date),
         vendor=vendor_name, vendor_notes=vendor_notes,
         # Selling prices
         gold_purity=gold_purity_label, gold_color=gold_color, gold_weight=gold_weight,
@@ -409,6 +424,12 @@ def render(gold_base, diamond_base, shape_dfs):
         total_cost=total_cost, total_profit=total_profit, profit_pct=profit_pct,
         notes=notes,
     )
+
+    # Only confirmed orders carry a due date; leaving the key out entirely
+    # means saving an estimate can't write a placeholder, and updating an
+    # order can't blank the real one.
+    if due_date is not None:
+        estimation["due_date"] = str(due_date)
 
     b1, b2, b3 = st.columns(3)
 

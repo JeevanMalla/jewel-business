@@ -219,14 +219,24 @@ def render():
                         unsafe_allow_html=True,
                     )
                     st.markdown("")
-                    if st.button(
-                        "✅ Convert to Order",
-                        key=f"conv_{oid}",
-                        use_container_width=True,
-                    ):
+                    # The delivery date is promised here, at the moment the
+                    # job is actually committed to — an estimate carries none.
+                    cv1, cv2 = st.columns([1, 2])
+                    with cv1:
+                        conv_due = st.date_input(
+                            "📅 Due Date", value=date.today(), key=f"conv_due_{oid}",
+                        )
+                    with cv2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        do_convert = st.button(
+                            "✅ Convert to Order",
+                            key=f"conv_{oid}",
+                            use_container_width=True,
+                        )
+                    if do_convert:
                         # Moves the document out of `estimates` and into
                         # `orders` with status "Pending".
-                        convert_estimate_to_order(oid)
+                        convert_estimate_to_order(oid, due_date=conv_due)
 
                         # ── Start the production pipeline now that it's a real order ──
                         init_production_pipeline(oid)

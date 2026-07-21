@@ -260,11 +260,14 @@ def delete_estimate(order_id):
 
 
 @_safe_write("convert the estimate to an order")
-def convert_estimate_to_order(order_id):
+def convert_estimate_to_order(order_id, due_date=None):
     """
     Moves the estimate document into `orders` with status "Pending" and
     removes it from `estimates`. Returns the resulting order document so the
     caller can start the production pipeline and post the vendor ledger.
+
+    due_date: the promised delivery date, set here because an estimate is a
+    quote and carries no delivery commitment until it's confirmed.
 
     Safe to call twice — if the order already exists the estimate is simply
     cleaned up and the existing order returned.
@@ -281,6 +284,7 @@ def convert_estimate_to_order(order_id):
 
     doc.pop("_id", None)
     doc["status"]       = "Pending"
+    doc["due_date"]     = str(due_date) if due_date else ""
     doc["created_at"]   = doc.get("created_at") or datetime.now()
     doc["converted_at"] = datetime.now()
 

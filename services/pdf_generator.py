@@ -98,12 +98,15 @@ def _data_table(rows: list, col_widths: list,
 def _build_header(e: dict, doc_type: str, doc_number: str,
                   business_name: str, logo_bytes, styles) -> list:
     """Returns list of flowables for the document header."""
+    # An estimate is a quote and carries no delivery commitment, so it has no
+    # due_date — omit the line entirely rather than printing a blank promise.
+    due = e.get("due_date", "")
     info_text = (
         f"<font size=9>"
         f"<b>{doc_type} No:</b> {doc_number}<br/>"
-        f"<b>Date:</b> {e['order_date']}<br/>"
-        f"<b>Due / Delivery:</b> {e['due_date']}"
-        f"</font>"
+        f"<b>Date:</b> {e.get('order_date', '')}"
+        + (f"<br/><b>Due / Delivery:</b> {due}" if due else "")
+        + f"</font>"
     )
     title_text = (
         f"<font size=18><b>{business_name}</b></font><br/>"
@@ -383,7 +386,7 @@ def generate_invoice_pdf(
     # Invoice meta row (HSN, invoice date)
     meta = Table([[
         Paragraph(f"<font size=9><b>HSN Code:</b> 7113 (Jewellery)</font>", styles["Normal"]),
-        Paragraph(f"<font size=9><b>Invoice Date:</b> {e['order_date']}</font>", styles["Normal"]),
+        Paragraph(f"<font size=9><b>Invoice Date:</b> {e.get('order_date', '')}</font>", styles["Normal"]),
         Paragraph(f"<font size=9><b>Invoice No:</b> {invoice_no}</font>",   styles["Normal"]),
     ]], colWidths=[60*mm, 60*mm, 60*mm])
     meta.setStyle(TableStyle([
