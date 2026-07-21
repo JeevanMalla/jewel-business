@@ -1,69 +1,307 @@
 """
 services/database.py
-All MongoDB operations - orders, prices, settings, transactions, vendors,
-production tracking.
+All MongoDB operations - estimates, orders, prices, settings, transactions,
+vendors, production tracking.
+
+Error handling contract
+-----------------------
+Reads  : never raise. On failure they record the error (see `get_db_error`)
+         and return a safe empty default, so a page can still render. The UI
+         shows a "database unavailable" banner instead of silently pretending
+         the database is empty.
+Writes : raise `DatabaseError` with a human-readable message. `app.py` catches
+         it once at the dispatch level and renders a clean error card, so a
+         failed save is always visible and never a raw traceback.
 """
+import certifi
 import streamlit as st
+from functools import wraps
 from pymongo import MongoClient
+from pymongo.errors import (
+    ConnectionFailure,
+    ServerSelectionTimeoutError,
+    OperationFailure,
+    ConfigurationError,
+    PyMongoError,
+)
 from datetime import datetime
 from bson import ObjectId
 
 from config.settings import PRODUCTION_STAGES
 
 
+class DatabaseError(Exception):
+    """Raised when a write could not be completed. Carries a user-facing message."""
+
+
+# ── Error reporting ───────────────────────────────────────────────────────────
+_DB_ERROR_KEY = "_db_error"
+
+
+def _humanize(exc: Exception) -> str:
+    """Turn a pymongo exception into something a jeweller can act on."""
+    if isinstance(exc, (ServerSelectionTimeoutError, ConnectionFailure)):
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            return ("Couldn't verify MongoDB's SSL certificate. This machine's "
+                    "Python is missing its CA bundle — run "
+                    "`pip install --upgrade certifi`, or "
+                    "`/Applications/Python 3.x/Install Certificates.command`.")
+        return ("Can't reach MongoDB. Check your internet connection and that "
+                "this machine's IP is allowed in Atlas → Network Access.")
+    if isinstance(exc, ConfigurationError):
+        return "MongoDB is misconfigured. Check `mongodb_uri` in .streamlit/secrets.toml."
+    if isinstance(exc, OperationFailure):
+        code = getattr(exc, "code", None)
+        if code in (13, 18):     # Unauthorized / AuthenticationFailed
+            return "MongoDB rejected the credentials in .streamlit/secrets.toml."
+        return f"MongoDB rejected the operation: {exc!s}"
+    if isinstance(exc, KeyError):
+        return f"Missing secret: {exc!s}. Add it to .streamlit/secrets.toml."
+    if isinstance(exc, PyMongoError):
+        return f"Database error: {exc!s}"
+    return f"Unexpected error: {exc!s}"
+
+
+def _record_db_error(where: str, exc: Exception):
+    try:
+        st.session_state[_DB_ERROR_KEY] = {
+            "where":   where,
+            "message": _humanize(exc),
+            "when":    datetime.now(),
+        }
+    except Exception:
+        # session_state is unavailable outside a script run — never let error
+        # reporting itself become the failure.
+        pass
+
+
+def get_db_error():
+    """The most recent read failure, or None. Used to render the UI banner."""
+    try:
+        return st.session_state.get(_DB_ERROR_KEY)
+    except Exception:
+        return None
+
+
+def clear_db_error():
+    try:
+        st.session_state.pop(_DB_ERROR_KEY, None)
+    except Exception:
+        pass
+
+
+def _safe_read(default_factory):
+    """Reads degrade to a safe default and record why."""
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                _record_db_error(fn.__name__, exc)
+                return default_factory()
+        return wrapper
+    return deco
+
+
+def _safe_write(action: str):
+    """Writes surface a clean, actionable DatabaseError instead of failing quietly."""
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except DatabaseError:
+                raise
+            except Exception as exc:
+                _record_db_error(fn.__name__, exc)
+                raise DatabaseError(f"Couldn't {action}. {_humanize(exc)}") from exc
+        return wrapper
+    return deco
+
+
 # ── Connection ────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_db():
-    uri     = st.secrets["mongodb_uri"]
-    db_name = st.secrets.get("mongodb_db", "jewel_manager")
-    client  = MongoClient(uri)
-    return client[db_name]
+    """
+    Connects and verifies the connection with a ping. MongoClient is lazy, so
+    without the ping a bad URI would surface much later as a confusing error
+    in the middle of a page.
+    """
+    try:
+        uri     = st.secrets["mongodb_uri"]
+        db_name = st.secrets.get("mongodb_db", "jewel_manager")
+        # tlsCAFile: macOS Python builds ship without a usable system CA
+        # bundle, so verifying Atlas's certificate fails with
+        # CERTIFICATE_VERIFY_FAILED. certifi is already a dependency.
+        client  = MongoClient(
+            uri,
+            serverSelectionTimeoutMS=8000,
+            tlsCAFile=certifi.where(),
+        )
+        client.admin.command("ping")
+        db = client[db_name]
+    except Exception as exc:
+        raise DatabaseError(_humanize(exc)) from exc
+
+    _migrate_estimates_out_of_orders(db)
+    return db
 
 
 def _col(name):
     return get_db()[name]
 
 
-# ── Orders ────────────────────────────────────────────────────────────────────
-def get_all_orders(filters=None):
+def db_is_reachable() -> bool:
+    """Cheap health check for the UI banner. Never raises."""
     try:
-        docs = list(_col("orders").find(filters or {}).sort("created_at", -1))
-        print(docs)
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        return docs
+        get_db().client.admin.command("ping")
+        return True
     except Exception:
-        return []
+        return False
 
 
+# ── One-time migration ────────────────────────────────────────────────────────
+def _migrate_estimates_out_of_orders(db):
+    """
+    Estimates used to live in `orders` with status "Estimate". They now have
+    their own collection. Moves any leftovers across on first connect.
+    Idempotent and near-free once done.
+    """
+    try:
+        legacy = list(db["orders"].find({"status": "Estimate"}))
+        if not legacy:
+            return
+        for doc in legacy:
+            oid = doc.get("order_id")
+            if not oid:
+                continue
+            if not db["estimates"].find_one({"order_id": oid}):
+                db["estimates"].insert_one(doc)
+        db["orders"].delete_many({"status": "Estimate"})
+    except Exception:
+        # A failed migration must never block the app from opening.
+        pass
+
+
+# ── Estimates ─────────────────────────────────────────────────────────────────
+# Estimates are quotes, not commitments. Nothing else in the system reacts to
+# them: no production pipeline, no vendor ledger, no revenue. All of that starts
+# at convert_estimate_to_order().
+
+@_safe_read(list)
+def get_all_estimates(filters=None):
+    docs = list(_col("estimates").find(filters or {}).sort("created_at", -1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
+
+
+@_safe_read(lambda: None)
+def get_estimate(order_id):
+    doc = _col("estimates").find_one({"order_id": order_id})
+    if doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
+
+@_safe_write("save the estimate")
+def save_estimate(doc):
+    doc = dict(doc)
+    doc["status"]     = "Estimate"
+    doc["created_at"] = datetime.now()
+    result = _col("estimates").insert_one(doc)
+    return str(result.inserted_id)
+
+
+@_safe_write("update the estimate")
+def update_estimate(order_id, updates):
+    updates = dict(updates)
+    updates.pop("_id", None)
+    updates["status"] = "Estimate"          # editing never promotes an estimate
+    _col("estimates").update_one({"order_id": order_id}, {"$set": updates})
+
+
+@_safe_write("delete the estimate")
+def delete_estimate(order_id):
+    _col("estimates").delete_one({"order_id": order_id})
+
+
+@_safe_write("convert the estimate to an order")
+def convert_estimate_to_order(order_id):
+    """
+    Moves the estimate document into `orders` with status "Pending" and
+    removes it from `estimates`. Returns the resulting order document so the
+    caller can start the production pipeline and post the vendor ledger.
+
+    Safe to call twice — if the order already exists the estimate is simply
+    cleaned up and the existing order returned.
+    """
+    existing = _col("orders").find_one({"order_id": order_id})
+    if existing:
+        _col("estimates").delete_one({"order_id": order_id})
+        existing["_id"] = str(existing["_id"])
+        return existing
+
+    doc = _col("estimates").find_one({"order_id": order_id})
+    if not doc:
+        raise DatabaseError(f"Estimate {order_id} no longer exists.")
+
+    doc.pop("_id", None)
+    doc["status"]       = "Pending"
+    doc["created_at"]   = doc.get("created_at") or datetime.now()
+    doc["converted_at"] = datetime.now()
+
+    _col("orders").insert_one(dict(doc))
+    _col("estimates").delete_one({"order_id": order_id})
+    return doc
+
+
+# ── Orders ────────────────────────────────────────────────────────────────────
+@_safe_read(list)
+def get_all_orders(filters=None):
+    docs = list(_col("orders").find(filters or {}).sort("created_at", -1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
+
+
+@_safe_write("save the order")
 def save_order(doc):
+    doc = dict(doc)
     doc["created_at"] = datetime.now()
     result = _col("orders").insert_one(doc)
     return str(result.inserted_id)
 
 
+@_safe_write("update the order")
 def update_order(order_id, updates):
+    updates = dict(updates)
+    updates.pop("_id", None)
     _col("orders").update_one({"order_id": order_id}, {"$set": updates})
 
 
+@_safe_write("delete the order")
 def delete_order(order_id):
     _col("orders").delete_one({"order_id": order_id})
 
 
 # ── Prices ────────────────────────────────────────────────────────────────────
+_DEFAULT_PRICES = {"gold": 9220.49, "diamond": 7500.0}
+
+
+@_safe_read(lambda: dict(_DEFAULT_PRICES))
 def get_prices():
-    try:
-        doc = _col("prices").find_one({"_id": "main"})
-        if not doc:
-            return {"gold": 9220.49, "diamond": 7500.0}
-        return {
-            "gold":    float(doc.get("gold_price_24k",          9220.49)),
-            "diamond": float(doc.get("diamond_price_per_carat", 7500.0)),
-        }
-    except Exception:
-        return {"gold": 9220.49, "diamond": 7500.0}
+    doc = _col("prices").find_one({"_id": "main"})
+    if not doc:
+        return dict(_DEFAULT_PRICES)
+    return {
+        "gold":    float(doc.get("gold_price_24k",          _DEFAULT_PRICES["gold"])),
+        "diamond": float(doc.get("diamond_price_per_carat", _DEFAULT_PRICES["diamond"])),
+    }
 
 
+@_safe_write("save the prices")
 def save_prices(gold, diamond):
     _col("prices").replace_one(
         {"_id": "main"},
@@ -73,14 +311,13 @@ def save_prices(gold, diamond):
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
+@_safe_read(lambda: "")
 def get_setting(key, default=""):
-    try:
-        doc = _col("settings").find_one({"key": key})
-        return str(doc["value"]) if doc else default
-    except Exception:
-        return default
+    doc = _col("settings").find_one({"key": key})
+    return str(doc["value"]) if doc else default
 
 
+@_safe_write("save the setting")
 def set_setting(key, value):
     _col("settings").replace_one(
         {"key": key},
@@ -90,89 +327,97 @@ def set_setting(key, value):
 
 
 # ── Vendors ───────────────────────────────────────────────────────────────────
+@_safe_read(list)
 def get_all_vendors():
-    try:
-        docs = list(_col("vendors").find().sort("name", 1))
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        return docs
-    except Exception:
-        return []
+    docs = list(_col("vendors").find().sort("name", 1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
 
 
+@_safe_write("save the vendor")
 def save_vendor(doc):
+    doc = dict(doc)
     doc["created_at"] = datetime.now()
     _col("vendors").insert_one(doc)
 
 
+@_safe_write("delete the vendor")
 def delete_vendor(vendor_id):
     _col("vendors").delete_one({"_id": ObjectId(vendor_id)})
 
 
 # ── Transactions (Ledger) ─────────────────────────────────────────────────────
+@_safe_read(list)
 def get_transactions(filters=None):
-    try:
-        docs = list(_col("transactions").find(filters or {}).sort("date", -1))
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        return docs
-    except Exception:
-        return []
+    docs = list(_col("transactions").find(filters or {}).sort("date", -1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
 
 
+@_safe_write("save the transaction")
 def save_transaction(doc):
+    doc = dict(doc)
     doc["created_at"] = datetime.now()
     _col("transactions").insert_one(doc)
 
 
+@_safe_write("delete the transaction")
 def delete_transaction(txn_id):
     _col("transactions").delete_one({"_id": ObjectId(txn_id)})
 
 
+@_safe_read(lambda: {"cash_balance": 0.0, "gold_balance": 0.0})
 def get_party_balance(party_name, party_type):
     """
     Returns {cash_balance, gold_balance_grams} for a customer or vendor.
     Positive cash  = they owe us  (customer) / we owe them (vendor)
     Positive gold  = they gave us gold / we gave them gold
     """
-    try:
-        txns = list(_col("transactions").find({
-            "party_name": party_name,
-            "party_type": party_type,
-        }))
-        cash_bal = 0.0
-        gold_bal = 0.0
-        for t in txns:
-            cash_bal += float(t.get("cash_amount", 0) or 0)
-            gold_bal += float(t.get("gold_grams",  0) or 0)
-        return {"cash_balance": cash_bal, "gold_balance": gold_bal}
-    except Exception:
-        return {"cash_balance": 0.0, "gold_balance": 0.0}
+    txns = list(_col("transactions").find({
+        "party_name": party_name,
+        "party_type": party_type,
+    }))
+    cash_bal = 0.0
+    gold_bal = 0.0
+    for t in txns:
+        cash_bal += float(t.get("cash_amount", 0) or 0)
+        gold_bal += float(t.get("gold_grams",  0) or 0)
+    return {"cash_balance": cash_bal, "gold_balance": gold_bal}
 
 
 # ── Order Vendor Transactions ─────────────────────────────────────────────────
+@_safe_read(list)
 def get_order_vendor_txns(order_id):
     """All vendor transactions linked to a specific order."""
-    try:
-        docs = list(_col("order_vendor_txns").find(
-            {"order_id": order_id}
-        ).sort("date", -1))
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        return docs
-    except Exception:
-        return []
+    docs = list(_col("order_vendor_txns").find(
+        {"order_id": order_id}
+    ).sort("date", -1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
 
 
+@_safe_write("save the vendor transaction")
 def save_order_vendor_txn(doc):
+    doc = dict(doc)
     doc["created_at"] = datetime.now()
     _col("order_vendor_txns").insert_one(doc)
 
 
+@_safe_write("delete the vendor transaction")
 def delete_order_vendor_txn(txn_id):
     _col("order_vendor_txns").delete_one({"_id": ObjectId(txn_id)})
 
 
+_EMPTY_VENDOR_SUMMARY = {
+    "gold_sent": 0.0, "gold_received": 0.0,
+    "net_gold": 0.0, "cash_paid": 0.0, "goods_received": 0,
+}
+
+
+@_safe_read(lambda: dict(_EMPTY_VENDOR_SUMMARY))
 def get_order_vendor_summary(order_id):
     """
     Returns summary for an order:
@@ -181,40 +426,35 @@ def get_order_vendor_summary(order_id):
       cash_paid     : total cash paid to vendor
       goods_received: count of goods-received entries
     """
-    try:
-        docs = list(_col("order_vendor_txns").find({"order_id": order_id}))
-        gold_sent     = 0.0
-        gold_received = 0.0
-        cash_paid     = 0.0
-        goods_count   = 0
-        for d in docs:
-            txn_type = d.get("txn_type", "")
-            if txn_type == "gold_sent":
-                gold_sent     += float(d.get("gold_grams", 0) or 0)
-            elif txn_type == "gold_received":
-                gold_received += float(d.get("gold_grams", 0) or 0)
-            elif txn_type == "cash_paid":
-                cash_paid     += float(d.get("cash_amount", 0) or 0)
-            elif txn_type == "goods_received":
-                goods_count   += 1
-        return {
-            "gold_sent":      gold_sent,
-            "gold_received":  gold_received,
-            "net_gold":       gold_sent - gold_received,   # positive = still with vendor
-            "cash_paid":      cash_paid,
-            "goods_received": goods_count,
-        }
-    except Exception:
-        return {
-            "gold_sent": 0.0, "gold_received": 0.0,
-            "net_gold": 0.0, "cash_paid": 0.0, "goods_received": 0,
-        }
+    docs = list(_col("order_vendor_txns").find({"order_id": order_id}))
+    gold_sent     = 0.0
+    gold_received = 0.0
+    cash_paid     = 0.0
+    goods_count   = 0
+    for d in docs:
+        txn_type = d.get("txn_type", "")
+        if txn_type == "gold_sent":
+            gold_sent     += float(d.get("gold_grams", 0) or 0)
+        elif txn_type == "gold_received":
+            gold_received += float(d.get("gold_grams", 0) or 0)
+        elif txn_type == "cash_paid":
+            cash_paid     += float(d.get("cash_amount", 0) or 0)
+        elif txn_type == "goods_received":
+            goods_count   += 1
+    return {
+        "gold_sent":      gold_sent,
+        "gold_received":  gold_received,
+        "net_gold":       gold_sent - gold_received,   # positive = still with vendor
+        "cash_paid":      cash_paid,
+        "goods_received": goods_count,
+    }
 
 
 # ── Production Pipeline ───────────────────────────────────────────────────────
 # One doc per (order_id, stage_name) in "production_stages" — 10 per order.
 # Every change to a stage is also logged to "production_events" for audit.
 
+@_safe_write("start the production pipeline")
 def init_production_pipeline(order_id):
     """
     Call once, right when an Estimate is converted into a confirmed Order.
@@ -223,38 +463,33 @@ def init_production_pipeline(order_id):
     opens IN_PROGRESS. Safe to call more than once — no-ops if the order
     already has stages.
     """
-    try:
-        if _col("production_stages").find_one({"order_id": order_id}):
-            return
-        now  = datetime.now()
-        docs = []
-        for i, stage in enumerate(PRODUCTION_STAGES):
-            docs.append({
-                "order_id":     order_id,
-                "stage_name":   stage,
-                "stage_index":  i,
-                "assigned_to":  "",
-                "status":       "COMPLETED" if i == 0 else ("IN_PROGRESS" if i == 1 else "NOT_STARTED"),
-                "deadline":     None,
-                "completed_at": now if i == 0 else None,
-                "notes":        "",
-                "images":       [],
-            })
-        _col("production_stages").insert_many(docs)
-        log_production_event(order_id, "System", "pipeline_started", "", PRODUCTION_STAGES[1])
-    except Exception:
-        pass
+    if _col("production_stages").find_one({"order_id": order_id}):
+        return
+    now  = datetime.now()
+    docs = []
+    for i, stage in enumerate(PRODUCTION_STAGES):
+        docs.append({
+            "order_id":     order_id,
+            "stage_name":   stage,
+            "stage_index":  i,
+            "assigned_to":  "",
+            "status":       "COMPLETED" if i == 0 else ("IN_PROGRESS" if i == 1 else "NOT_STARTED"),
+            "deadline":     None,
+            "completed_at": now if i == 0 else None,
+            "notes":        "",
+            "images":       [],
+        })
+    _col("production_stages").insert_many(docs)
+    log_production_event(order_id, "System", "pipeline_started", "", PRODUCTION_STAGES[1])
 
 
+@_safe_read(list)
 def get_order_stages(order_id):
     """All 10 stage docs for an order, in pipeline order."""
-    try:
-        docs = list(_col("production_stages").find({"order_id": order_id}).sort("stage_index", 1))
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        return docs
-    except Exception:
-        return []
+    docs = list(_col("production_stages").find({"order_id": order_id}).sort("stage_index", 1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
 
 
 def get_current_stage(order_id):
@@ -268,51 +503,48 @@ def get_current_stage(order_id):
     return stages[-1]
 
 
+@_safe_read(list)
 def get_all_active_production():
     """
     One row per order that has an active (not-yet-Delivered) pipeline —
     each row is that order's *current* stage doc. This is what the Kanban
     board and dashboard alerts are built from.
     """
-    try:
-        pipeline = [
-            {"$match": {"status": {"$ne": "COMPLETED"}}},
-            {"$sort": {"stage_index": 1}},
-            {"$group": {"_id": "$order_id", "stage": {"$first": "$$ROOT"}}},
-        ]
-        rows = list(_col("production_stages").aggregate(pipeline))
-        out  = []
-        for r in rows:
-            s = r["stage"]
-            s["_id"] = str(s["_id"])
-            out.append(s)
-        return out
-    except Exception:
-        return []
+    pipeline = [
+        {"$match": {"status": {"$ne": "COMPLETED"}}},
+        {"$sort": {"stage_index": 1}},
+        {"$group": {"_id": "$order_id", "stage": {"$first": "$$ROOT"}}},
+    ]
+    rows = list(_col("production_stages").aggregate(pipeline))
+    out  = []
+    for r in rows:
+        s = r["stage"]
+        s["_id"] = str(s["_id"])
+        out.append(s)
+    return out
 
 
+@_safe_write("update the production stage")
 def update_production_stage(order_id, stage_name, updates, user="Admin"):
     """
     Generic field updater for one stage doc. Diffs against the current
     value for each field and logs a production_events row per change —
     this is what powers the "Full History" expander.
     """
-    try:
-        current = _col("production_stages").find_one({"order_id": order_id, "stage_name": stage_name})
-        if not current:
-            return
-        for field, new_val in updates.items():
-            old_val = current.get(field)
-            if old_val != new_val:
-                log_production_event(order_id, user, f"update_{field}", old_val, new_val, stage_name)
-        _col("production_stages").update_one(
-            {"order_id": order_id, "stage_name": stage_name},
-            {"$set": updates},
-        )
-    except Exception:
-        pass
+    current = _col("production_stages").find_one({"order_id": order_id, "stage_name": stage_name})
+    if not current:
+        raise DatabaseError(f"Stage \"{stage_name}\" doesn't exist for order {order_id}.")
+    for field, new_val in updates.items():
+        old_val = current.get(field)
+        if old_val != new_val:
+            log_production_event(order_id, user, f"update_{field}", old_val, new_val, stage_name)
+    _col("production_stages").update_one(
+        {"order_id": order_id, "stage_name": stage_name},
+        {"$set": updates},
+    )
 
 
+@_safe_write("move the production stage")
 def move_stage(order_id, direction, user="Admin"):
     """
     direction: "forward" or "backward". No validation blocks this — the
@@ -321,47 +553,44 @@ def move_stage(order_id, direction, user="Admin"):
     Backward: reopens the current stage as NOT_STARTED, re-activates the
     previous stage as IN_PROGRESS (clearing its completed_at).
     """
-    try:
-        stages = get_order_stages(order_id)
-        if not stages:
-            return
-        idx = next((i for i, s in enumerate(stages) if s["status"] != "COMPLETED"), len(stages) - 1)
-        now = datetime.now()
+    stages = get_order_stages(order_id)
+    if not stages:
+        raise DatabaseError(f"Order {order_id} has no production pipeline yet.")
+    idx = next((i for i, s in enumerate(stages) if s["status"] != "COMPLETED"), len(stages) - 1)
+    now = datetime.now()
 
-        if direction == "forward" and idx == len(stages) - 1:
-            # Last stage (Delivered) — nothing to open next, just close it out.
-            cur = stages[idx]
-            _col("production_stages").update_one(
-                {"_id": ObjectId(cur["_id"])},
-                {"$set": {"status": "COMPLETED", "completed_at": now}},
-            )
-            log_production_event(order_id, user, "move_forward", cur["stage_name"], "— (delivered)")
+    if direction == "forward" and idx == len(stages) - 1:
+        # Last stage (Delivered) — nothing to open next, just close it out.
+        cur = stages[idx]
+        _col("production_stages").update_one(
+            {"_id": ObjectId(cur["_id"])},
+            {"$set": {"status": "COMPLETED", "completed_at": now}},
+        )
+        log_production_event(order_id, user, "move_forward", cur["stage_name"], "— (delivered)")
 
-        elif direction == "forward" and idx < len(stages) - 1:
-            cur, nxt = stages[idx], stages[idx + 1]
-            _col("production_stages").update_one(
-                {"_id": ObjectId(cur["_id"])},
-                {"$set": {"status": "COMPLETED", "completed_at": now}},
-            )
-            _col("production_stages").update_one(
-                {"_id": ObjectId(nxt["_id"])},
-                {"$set": {"status": "IN_PROGRESS"}},
-            )
-            log_production_event(order_id, user, "move_forward", cur["stage_name"], nxt["stage_name"])
+    elif direction == "forward" and idx < len(stages) - 1:
+        cur, nxt = stages[idx], stages[idx + 1]
+        _col("production_stages").update_one(
+            {"_id": ObjectId(cur["_id"])},
+            {"$set": {"status": "COMPLETED", "completed_at": now}},
+        )
+        _col("production_stages").update_one(
+            {"_id": ObjectId(nxt["_id"])},
+            {"$set": {"status": "IN_PROGRESS"}},
+        )
+        log_production_event(order_id, user, "move_forward", cur["stage_name"], nxt["stage_name"])
 
-        elif direction == "backward" and idx > 0:
-            cur, prev = stages[idx], stages[idx - 1]
-            _col("production_stages").update_one(
-                {"_id": ObjectId(cur["_id"])},
-                {"$set": {"status": "NOT_STARTED"}},
-            )
-            _col("production_stages").update_one(
-                {"_id": ObjectId(prev["_id"])},
-                {"$set": {"status": "IN_PROGRESS", "completed_at": None}},
-            )
-            log_production_event(order_id, user, "move_backward", cur["stage_name"], prev["stage_name"])
-    except Exception:
-        pass
+    elif direction == "backward" and idx > 0:
+        cur, prev = stages[idx], stages[idx - 1]
+        _col("production_stages").update_one(
+            {"_id": ObjectId(cur["_id"])},
+            {"$set": {"status": "NOT_STARTED"}},
+        )
+        _col("production_stages").update_one(
+            {"_id": ObjectId(prev["_id"])},
+            {"$set": {"status": "IN_PROGRESS", "completed_at": None}},
+        )
+        log_production_event(order_id, user, "move_backward", cur["stage_name"], prev["stage_name"])
 
 
 def flag_stage_needs_changes(order_id, stage_name, notes="", user="Admin"):
@@ -372,26 +601,24 @@ def flag_stage_needs_changes(order_id, stage_name, notes="", user="Admin"):
     update_production_stage(order_id, stage_name, updates, user)
 
 
+@_safe_write("mark the order as delivered")
 def mark_order_delivered(order_id, user="Admin"):
     """
     Jeweller override: skip straight to Delivered regardless of what stage
     the order is currently sitting in (rush job, walk-in pickup, backfilled
     historical order, etc). Closes out every remaining stage in one shot.
     """
-    try:
-        stages = get_order_stages(order_id)
-        if not stages:
-            return
-        now = datetime.now()
-        for s in stages:
-            if s["status"] != "COMPLETED":
-                _col("production_stages").update_one(
-                    {"_id": ObjectId(s["_id"])},
-                    {"$set": {"status": "COMPLETED", "completed_at": now}},
-                )
-        log_production_event(order_id, user, "mark_delivered", "", "Delivered (skipped remaining stages)")
-    except Exception:
-        pass
+    stages = get_order_stages(order_id)
+    if not stages:
+        return
+    now = datetime.now()
+    for s in stages:
+        if s["status"] != "COMPLETED":
+            _col("production_stages").update_one(
+                {"_id": ObjectId(s["_id"])},
+                {"$set": {"status": "COMPLETED", "completed_at": now}},
+            )
+    log_production_event(order_id, user, "mark_delivered", "", "Delivered (skipped remaining stages)")
 
 
 def assign_karigar(order_id, stage_name, karigar_name, user="Admin"):
@@ -406,22 +633,24 @@ def add_stage_note(order_id, stage_name, note, user="Admin"):
     update_production_stage(order_id, stage_name, {"notes": note}, user)
 
 
+@_safe_write("attach the image to the stage")
 def add_stage_image(order_id, stage_name, image_url, user="Admin"):
-    try:
-        stage  = _col("production_stages").find_one({"order_id": order_id, "stage_name": stage_name}) or {}
-        images = stage.get("images", [])
-        images.append(image_url)
-        _col("production_stages").update_one(
-            {"order_id": order_id, "stage_name": stage_name},
-            {"$set": {"images": images}},
-        )
-        log_production_event(order_id, user, "add_image", "", image_url, stage_name)
-    except Exception:
-        pass
+    stage  = _col("production_stages").find_one({"order_id": order_id, "stage_name": stage_name}) or {}
+    images = stage.get("images", [])
+    images.append(image_url)
+    _col("production_stages").update_one(
+        {"order_id": order_id, "stage_name": stage_name},
+        {"$set": {"images": images}},
+    )
+    log_production_event(order_id, user, "add_image", "", image_url, stage_name)
 
 
 # ── Production Events (audit trail) ───────────────────────────────────────────
 def log_production_event(order_id, user, action, old_value, new_value, stage_name=""):
+    """
+    Audit logging is best-effort by design: a failure to write history must
+    never block the actual production update the user asked for.
+    """
     try:
         _col("production_events").insert_one({
             "order_id":   order_id,
@@ -432,46 +661,45 @@ def log_production_event(order_id, user, action, old_value, new_value, stage_nam
             "new_value":  "" if new_value is None else str(new_value),
             "created_at": datetime.now(),
         })
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_db_error("log_production_event", exc)
 
 
+@_safe_read(list)
 def get_production_events(order_id):
-    try:
-        docs = list(_col("production_events").find({"order_id": order_id}).sort("created_at", -1))
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        return docs
-    except Exception:
-        return []
+    docs = list(_col("production_events").find({"order_id": order_id}).sort("created_at", -1))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return docs
 
 
 # ── Production KPIs (dashboard + Kanban header) ───────────────────────────────
+_EMPTY_KPIS = {"total_active": 0, "delayed": 0, "due_today": 0, "waiting_approval": 0}
+
+
+@_safe_read(lambda: dict(_EMPTY_KPIS))
 def get_production_kpis():
-    try:
-        active = get_all_active_production()
-        today  = datetime.now().date()
+    active = get_all_active_production()
+    today  = datetime.now().date()
 
-        delayed = due_today = waiting_approval = 0
-        for s in active:
-            dl = s.get("deadline")
-            if dl:
-                try:
-                    dl_date = datetime.strptime(str(dl)[:10], "%Y-%m-%d").date()
-                    if dl_date < today:
-                        delayed += 1
-                    elif dl_date == today:
-                        due_today += 1
-                except Exception:
-                    pass
-            if s["stage_name"] == "Customer CAD Approval":
-                waiting_approval += 1
+    delayed = due_today = waiting_approval = 0
+    for s in active:
+        dl = s.get("deadline")
+        if dl:
+            try:
+                dl_date = datetime.strptime(str(dl)[:10], "%Y-%m-%d").date()
+                if dl_date < today:
+                    delayed += 1
+                elif dl_date == today:
+                    due_today += 1
+            except (ValueError, TypeError):
+                pass
+        if s["stage_name"] == "Customer CAD Approval":
+            waiting_approval += 1
 
-        return {
-            "total_active":     len(active),
-            "delayed":          delayed,
-            "due_today":        due_today,
-            "waiting_approval": waiting_approval,
-        }
-    except Exception:
-        return {"total_active": 0, "delayed": 0, "due_today": 0, "waiting_approval": 0}
+    return {
+        "total_active":     len(active),
+        "delayed":          delayed,
+        "due_today":        due_today,
+        "waiting_approval": waiting_approval,
+    }

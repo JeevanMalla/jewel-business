@@ -11,6 +11,7 @@ from services.database import (
     get_all_orders, update_order, delete_order, get_order_vendor_summary,
     save_transaction, init_production_pipeline, mark_order_delivered,
     get_setting, get_order_stages,
+    get_all_estimates, update_estimate, delete_estimate, convert_estimate_to_order,
 )
 from services.pdf_generator import generate_karigar_pdf
 from components.image_uploader import render_image_gallery, render_image_uploader
@@ -49,10 +50,13 @@ def render():
     st.markdown("# 📦 Order Management")
     st.markdown("---")
 
-    all_orders = get_all_orders()
+    # Estimates and orders are separate collections; this page shows both so
+    # an estimate is reachable for conversion. Everything downstream keys off
+    # `status == "Estimate"`, exactly as before.
+    all_orders = get_all_estimates() + get_all_orders()
 
     if not all_orders:
-        st.info("📭 No orders yet. Create an estimation first!")
+        st.info("📭 Nothing here yet. Create an estimation first!")
         return
 
     df = _safe_df(all_orders)
@@ -168,7 +172,10 @@ def render():
                 new_imgs = render_image_uploader(oid, key_prefix=f"ord_{oid}")
                 if new_imgs:
                     if st.button("💾 Save Images", key=f"save_img_{oid}"):
-                        update_order(oid, new_imgs)
+                        if is_estimate:
+                            update_estimate(oid, new_imgs)
+                        else:
+                            update_order(oid, new_imgs)
                         st.success("✅ Images saved!")
                         st.rerun()
 
@@ -205,7 +212,9 @@ def render():
                         key=f"conv_{oid}",
                         use_container_width=True,
                     ):
-                        update_order(oid, {"status": "Pending"})
+                        # Moves the document out of `estimates` and into
+                        # `orders` with status "Pending".
+                        convert_estimate_to_order(oid)
 
                         # ── Start the production pipeline now that it's a real order ──
                         init_production_pipeline(oid)
@@ -213,8 +222,6 @@ def render():
                         # ── Post vendor ledger now that it's a confirmed order ──
                         vendor_name = str(row.get("vendor", "") or "")
                         if vendor_name:
-                            from datetime import datetime as _dt
-
                             gold_wt     = float(row.get("gold_weight", row.get("gold_wt", 0)) or 0)
                             gold_purity = str(row.get("gold_purity", "24K (99.9%)"))
                             pf          = GOLD_PURITY.get(gold_purity, 1.0)
@@ -279,25 +286,33 @@ def render():
                         st.rerun()
                     st.markdown("---")
 
-                a1, a2, a3 = st.columns([2, 2, 1])
-                with a1:
-                    cur_idx = ORDER_STATUSES.index(row["status"]) if row["status"] in ORDER_STATUSES else 0
-                    new_status = st.selectbox(
-                        "Update Status", ORDER_STATUSES,
-                        index=cur_idx, key=f"sel_{oid}",
-                    )
-                with a2:
-                    if st.button("✅ Update Status", key=f"upd_{oid}", use_container_width=True):
-                        update_order(oid, {"status": new_status})
-                        if new_status == "Delivered":
-                            mark_order_delivered(oid, "Admin")
-                        st.success("Updated!")
-                        st.rerun()
-                with a3:
-                    if st.button("🗑️ Delete", key=f"del_{oid}", use_container_width=True):
-                        delete_order(oid)
+                # An estimate has no order status — "Convert to Order" above is
+                # what gives it one. Only real orders get the status control.
+                if is_estimate:
+                    if st.button("🗑️ Delete Estimate", key=f"del_{oid}", use_container_width=True):
+                        delete_estimate(oid)
                         st.warning("Deleted.")
                         st.rerun()
+                else:
+                    a1, a2, a3 = st.columns([2, 2, 1])
+                    with a1:
+                        cur_idx = ORDER_STATUSES.index(row["status"]) if row["status"] in ORDER_STATUSES else 0
+                        new_status = st.selectbox(
+                            "Update Status", ORDER_STATUSES,
+                            index=cur_idx, key=f"sel_{oid}",
+                        )
+                    with a2:
+                        if st.button("✅ Update Status", key=f"upd_{oid}", use_container_width=True):
+                            update_order(oid, {"status": new_status})
+                            if new_status == "Delivered":
+                                mark_order_delivered(oid, "Admin")
+                            st.success("Updated!")
+                            st.rerun()
+                    with a3:
+                        if st.button("🗑️ Delete", key=f"del_{oid}", use_container_width=True):
+                            delete_order(oid)
+                            st.warning("Deleted.")
+                            st.rerun()
 
                 # Jump straight to the Production board for this order —
                 # only makes sense once it's a real order, not an Estimate.

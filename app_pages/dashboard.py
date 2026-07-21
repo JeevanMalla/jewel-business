@@ -6,7 +6,10 @@ import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
 
-from services.database import get_setting, get_all_orders, get_production_kpis, get_all_active_production
+from services.database import (
+    get_setting, get_all_orders, get_all_estimates,
+    get_production_kpis, get_all_active_production,
+)
 
 
 def render():
@@ -70,13 +73,14 @@ def render():
     this_mo = today.month
 
     # ── KPI cards ─────────────────────────────────────────────────────────────
-    # Exclude estimates from order KPIs
-    orders_only = df[df["status"] != "Estimate"]
-    estimates   = df[df["status"] == "Estimate"]
+    # `df` is the orders collection, which no longer contains estimates at all;
+    # estimates are counted separately and contribute nothing to revenue.
+    orders_only    = df
+    estimate_count = len(get_all_estimates())
 
     kpis = [
         ("Total Orders",   len(orders_only),                                        "#1a1a2e"),
-        ("Estimates",      len(estimates),                                           "#856404"),
+        ("Estimates",      estimate_count,                                          "#856404"),
         ("In Progress",    (orders_only["status"] == "In Progress").sum(),           "#004085"),
         ("Quality Check",  (orders_only["status"] == "Quality Check").sum(),         "#155724"),
         ("Ready",          (orders_only["status"] == "Ready for Delivery").sum(),    "#0c5460"),

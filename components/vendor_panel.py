@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 
+from config.settings import GOLD_PURITY
 from services.database import (
     get_order_vendor_txns,
     save_order_vendor_txn,
@@ -47,12 +48,9 @@ def render_vendor_panel(order_id: str, vendor_name: str, order_doc: dict):
     gold_wt        = float(order_doc.get("gold_weight",      order_doc.get("gold_wt", 0)) or 0)
     gold_rate      = float(order_doc.get("gold_price_gram",   0) or 0)
     gold_purity    = str(order_doc.get("gold_purity",         "24K (99.9%)"))
-    # Purity factor map
-    _PURITY_MAP = {
-        "24K (99.9%)": 1.000, "22K (91.6%)": 0.916,
-        "18K (75.0%)": 0.750, "14K (58.3%)": 0.583,
-    }
-    purity_factor  = _PURITY_MAP.get(gold_purity, 1.0)
+    # Purity factors come from GOLD_PURITY so the ledger can never disagree
+    # with what the estimate was priced at.
+    purity_factor  = GOLD_PURITY.get(gold_purity, 1.0)
     # Pure 24K equivalent of this order's gold
     gold_24k_wt    = round(gold_wt * purity_factor, 4)
     gold_24k_rate  = float(order_doc.get("gold_price_gram", 0) or 0) / purity_factor if purity_factor > 0 else gold_rate

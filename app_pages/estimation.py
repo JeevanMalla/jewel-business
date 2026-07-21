@@ -16,11 +16,13 @@ from config.settings import (
     GOLD_PURITY, ITEM_TYPES, DIAMOND_QUALITIES,
     DIAMOND_SHAPES_DEFAULT, CERTIFICATE_TYPES, HALLMARK_TYPES, GST_RATE,
 )
-from services.database import save_order, get_setting, get_all_vendors, update_order
+from services.database import (
+    save_estimate, update_estimate, update_order,
+    get_setting, get_all_vendors,
+)
 from services.diamond_sheet import get_price, get_sieve_sizes
 from services.pdf_generator import generate_estimation_pdf, generate_invoice_pdf
 from components.image_uploader import render_image_uploader, render_image_gallery
-from services.database import save_transaction
 
 
 # ── Diamond row helpers ───────────────────────────────────────────────────────
@@ -424,10 +426,14 @@ def render(gold_base, diamond_base, shape_dfs):
                         "customer_image": img_data.get("customer_image") or ed.get("customer_image", ""),
                         "cad_image":      img_data.get("cad_image")      or ed.get("cad_image", ""),
                     }
-                    # Status (Estimate / Pending / In Progress / etc.) is left
-                    # untouched — editing details shouldn't silently revert a
-                    # confirmed order back to "Estimate".
-                    update_order(editing_order_id, doc)
+                    # Estimates and orders live in different collections, so
+                    # the edit has to go back where it came from. Status is
+                    # left untouched — editing details shouldn't silently
+                    # revert a confirmed order back to "Estimate".
+                    if str(ed.get("status", "")) == "Estimate":
+                        update_estimate(editing_order_id, doc)
+                    else:
+                        update_order(editing_order_id, doc)
 
                     _reset_to_blank()
                     st.session_state["order_search"] = editing_order_id
@@ -446,7 +452,10 @@ def render(gold_base, diamond_base, shape_dfs):
                         "customer_image": img_data.get("customer_image", ""),
                         "cad_image":      img_data.get("cad_image", ""),
                     }
-                    save_order(doc)
+                    # Goes to the `estimates` collection — an estimate is only
+                    # a quote. It stays out of orders, revenue, production and
+                    # the vendor ledger until it's converted to an Order.
+                    save_estimate(doc)
 
                     del st.session_state["current_order_id"]
                     st.session_state.diamond_rows = [
@@ -455,7 +464,8 @@ def render(gold_base, diamond_base, shape_dfs):
                     ]
                     st.success(
                         f"✅ Estimate **{order_id}** saved! "
-                        f"Vendor ledger will be updated when you convert to Order."
+                        f"Nothing is committed yet — production and the vendor "
+                        f"ledger start when you convert it to an Order."
                     )
 
     with b2:

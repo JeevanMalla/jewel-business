@@ -86,6 +86,49 @@ def apply_global_css():
     }
     [data-testid="stSidebar"] * { color: white !important; }
 
+    /* Inputs keep a light background, so the blanket white above made their
+       text invisible (Gold ₹/gram and Diamond ₹/carat). Give them a dark
+       translucent field that matches the sidebar instead. */
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea,
+    [data-testid="stSidebar"] [data-baseweb="input"],
+    [data-testid="stSidebar"] [data-baseweb="select"] > div {
+        background-color: rgba(255,255,255,0.10) !important;
+        color: white !important;
+        border: 1px solid rgba(255,255,255,0.25) !important;
+        border-radius: 8px !important;
+        -webkit-text-fill-color: white !important;
+    }
+    /* BaseWeb nests an opaque white div between the bordered field and the
+       <input>. Without clearing it the white text lands on white. */
+    [data-testid="stSidebar"] [data-baseweb="base-input"],
+    [data-testid="stSidebar"] [data-baseweb="input"] > div {
+        background-color: transparent !important;
+        border: none !important;
+    }
+    [data-testid="stSidebar"] input:focus,
+    [data-testid="stSidebar"] [data-baseweb="input"]:focus-within {
+        border-color: #d4a843 !important;
+        box-shadow: 0 0 0 1px #d4a843 !important;
+    }
+    [data-testid="stSidebar"] input::placeholder { color: rgba(255,255,255,0.55) !important; }
+    /* number_input +/- steppers */
+    [data-testid="stSidebar"] [data-testid="stNumberInputStepUp"],
+    [data-testid="stSidebar"] [data-testid="stNumberInputStepDown"] {
+        background-color: rgba(255,255,255,0.10) !important;
+        border: 1px solid rgba(255,255,255,0.25) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stNumberInputStepUp"] svg,
+    [data-testid="stSidebar"] [data-testid="stNumberInputStepDown"] svg {
+        fill: white !important;
+    }
+    /* Sidebar buttons use the gold gradient — keep their label dark. */
+    [data-testid="stSidebar"] .stButton button,
+    [data-testid="stSidebar"] .stButton button * {
+        color: #1a1a2e !important;
+        -webkit-text-fill-color: #1a1a2e !important;
+    }
+
     /* ── Cards ── */
     .metric-card {
         background: white;
