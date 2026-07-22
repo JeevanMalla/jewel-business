@@ -21,7 +21,10 @@ from services.database import (
     get_setting, get_all_vendors,
 )
 from services.diamond_sheet import get_price, get_sieve_sizes
-from services.pdf_generator import generate_estimation_pdf, generate_invoice_pdf
+# The estimate now goes out as a JPEG; generate_estimation_pdf() is left in
+# services/pdf_generator.py, unused for now, pending the invoice/bill rework.
+from services.pdf_generator import generate_invoice_pdf
+from services.estimate_image import generate_estimate_jpeg
 from components.image_uploader import render_image_uploader, render_image_gallery
 
 
@@ -358,14 +361,12 @@ def render(gold_base, diamond_base, shape_dfs):
         with h4:
             ht_idx = HALLMARK_TYPES.index(ed["hallmark_type"]) if ed.get("hallmark_type") in HALLMARK_TYPES else 0
             hallmark_type      = st.selectbox("Hallmark",          HALLMARK_TYPES, index=ht_idx)
-        with h5: hallmark_per       = st.number_input("Sell ₹/article", value=55.0, step=5.0)
+        with h5: hallmark_per       = st.number_input("Sell ₹/article", value=float(ed.get("hallmark_per", 55.0)), step=5.0)
         with h6: hallmark_cost_per  = st.number_input("Cost ₹/article", value=float(ed.get("hallmark_cost_per", 45.0)), step=5.0)
-        with h7: hallmark_arts      = st.number_input("Articles",        value=2,    step=1, min_value=0)
+        with h7: hallmark_arts      = st.number_input("Articles",        value=int(ed.get("hallmark_arts", 2) or 0), step=1, min_value=0)
         hallmark_value      = round(hallmark_per      * hallmark_arts, 0)
         hallmark_cost_value = round(hallmark_cost_per * hallmark_arts, 0)
         with h8: st.metric("HM Sell / Cost", f"₹{hallmark_value:,.0f} / ₹{hallmark_cost_value:,.0f}")
-        if editing_order_id:
-            st.caption("ℹ️ Hallmark Sell ₹/article and Articles count aren't stored on the order, so they reset to defaults here — only the final Hallmark value/cost carried over. Re-enter them if they differ.")
         st.markdown("---")
 
         # ── Totals ────────────────────────────────────────────────────────────
@@ -432,6 +433,9 @@ def render(gold_base, diamond_base, shape_dfs):
         making_per_gram=making_per_gram, making_value=making_value,
         cert_type=cert_type, cert_cost=cert_cost,
         hallmark_type=hallmark_type, hallmark_value=hallmark_value,
+        # Per-article price and count: the estimate sheet prints both, and
+        # without storing them an edited order can't show what was charged.
+        hallmark_per=hallmark_per, hallmark_arts=hallmark_arts,
         net_amount=net_amount, gst_amount=gst_amount, gross_amount=gross_amount,
         # Cost prices (what you actually pay)
         gold_cost_per_gram=gold_cost_per_gram, gold_cost_value=gold_cost_value,
@@ -508,16 +512,27 @@ def render(gold_base, diamond_base, shape_dfs):
                     )
 
     with b2:
-        if st.button("📄 Estimation PDF", use_container_width=True):
-            bname      = get_setting("business_name", "Your Jewellery House")
-            logo_bytes = st.session_state.get("logo_bytes")
+        # The estimate goes out as a JPEG, not a PDF — it's sent over WhatsApp,
+        # where an image previews inline and a PDF doesn't.
+        if st.button("🖼️ Estimate JPEG", use_container_width=True):
+            bname = get_setting("business_name", "Your Jewellery House")
             try:
-                pdf = generate_estimation_pdf(estimation, bname, logo_bytes)
-                st.download_button("⬇️ Download Estimation", data=pdf,
-                                   file_name=f"Estimation_{order_id}.pdf",
-                                   mime="application/pdf", use_container_width=True)
+                img_bytes = generate_estimate_jpeg(
+                    {**estimation,
+                     "item_image": st.session_state.get("pending_images", {}).get("item_image")
+                                   or ed.get("item_image", "")},
+                    bname,
+                )
+                st.session_state[f"est_jpeg_{order_id}"] = img_bytes
             except Exception as ex:
-                st.error(f"PDF error: {ex}")
+                st.error(f"Image error: {ex}")
+
+        img_bytes = st.session_state.get(f"est_jpeg_{order_id}")
+        if img_bytes:
+            st.download_button("⬇️ Download Estimate JPEG", data=img_bytes,
+                               file_name=f"Estimate_{order_id}.jpg",
+                               mime="image/jpeg", use_container_width=True)
+            st.image(img_bytes, caption="Estimate preview", use_container_width=True)
 
     with b3:
         if st.button("🧾 Invoice PDF", use_container_width=True):
