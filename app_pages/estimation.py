@@ -25,6 +25,7 @@ from services.diamond_sheet import get_price, get_sieve_sizes
 # services/pdf_generator.py, unused for now, pending the invoice/bill rework.
 from services.pdf_generator import generate_invoice_pdf
 from services.estimate_image import generate_estimate_jpeg
+from services.estimate_pdf import generate_estimate_pdf
 from components.image_uploader import render_image_uploader, render_image_gallery
 
 
@@ -512,27 +513,43 @@ def render(gold_base, diamond_base, shape_dfs):
                     )
 
     with b2:
-        # The estimate goes out as a JPEG, not a PDF — it's sent over WhatsApp,
-        # where an image previews inline and a PDF doesn't.
-        if st.button("🖼️ Estimate JPEG", use_container_width=True):
-            bname = get_setting("business_name", "Your Jewellery House")
+        # The branded PDF is the customer-facing estimate. The item photo comes
+        # from whatever was uploaded this session, else what's saved on the order.
+        est_for_doc = {
+            **estimation,
+            "item_image": (st.session_state.get("pending_images", {}).get("item_image")
+                           or ed.get("item_image", "")),
+            "customer_image": (st.session_state.get("pending_images", {}).get("customer_image")
+                               or ed.get("customer_image", "")),
+        }
+        if st.button("📄 Estimate PDF", use_container_width=True):
+            bname = get_setting("business_name", "OVURA FINE JEWELLERY")
             try:
-                img_bytes = generate_estimate_jpeg(
-                    {**estimation,
-                     "item_image": st.session_state.get("pending_images", {}).get("item_image")
-                                   or ed.get("item_image", "")},
-                    bname,
-                )
-                st.session_state[f"est_jpeg_{order_id}"] = img_bytes
+                st.session_state[f"est_pdf_{order_id}"] = generate_estimate_pdf(est_for_doc, bname)
             except Exception as ex:
-                st.error(f"Image error: {ex}")
+                st.error(f"PDF error: {ex}")
 
-        img_bytes = st.session_state.get(f"est_jpeg_{order_id}")
-        if img_bytes:
-            st.download_button("⬇️ Download Estimate JPEG", data=img_bytes,
-                               file_name=f"Estimate_{order_id}.jpg",
-                               mime="image/jpeg", use_container_width=True)
-            st.image(img_bytes, caption="Estimate preview", use_container_width=True)
+        pdf_bytes = st.session_state.get(f"est_pdf_{order_id}")
+        if pdf_bytes:
+            st.download_button("⬇️ Download Estimate PDF", data=pdf_bytes,
+                               file_name=f"Estimate_{order_id}.pdf",
+                               mime="application/pdf", use_container_width=True)
+
+        # The spreadsheet-style JPEG stays available for WhatsApp (previews inline).
+        with st.expander("Also as WhatsApp JPEG"):
+            if st.button("🖼️ Build JPEG", key=f"jpeg_btn_{order_id}", use_container_width=True):
+                bname = get_setting("business_name", "OVURA FINE JEWELLERY")
+                try:
+                    st.session_state[f"est_jpeg_{order_id}"] = generate_estimate_jpeg(est_for_doc, bname)
+                except Exception as ex:
+                    st.error(f"Image error: {ex}")
+            img_bytes = st.session_state.get(f"est_jpeg_{order_id}")
+            if img_bytes:
+                st.download_button("⬇️ Download JPEG", data=img_bytes,
+                                   file_name=f"Estimate_{order_id}.jpg",
+                                   mime="image/jpeg", use_container_width=True,
+                                   key=f"jpeg_dl_{order_id}")
+                st.image(img_bytes, use_container_width=True)
 
     with b3:
         if st.button("🧾 Invoice PDF", use_container_width=True):
