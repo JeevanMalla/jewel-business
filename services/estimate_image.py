@@ -198,20 +198,37 @@ def _row(d, x, y, widths, cells, h=26, font=None, fills=None,
     return y + h
 
 
-def _fetch_image(url, max_w, max_h):
-    """Product photo for the right-hand panel. Never fatal."""
-    if not url:
+def _load_photo(src, max_w, max_h):
+    """
+    Resolve the item photo from any of: raw image bytes (a file the jeweller
+    just uploaded), a local file path, or an http(s) URL (a Cloudinary link).
+    Never fatal — returns None on anything it can't read.
+    """
+    if not src:
         return None
     try:
-        import requests
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
+        if isinstance(src, (bytes, bytearray)):
+            data = bytes(src)
+        elif os.path.exists(str(src)):
+            with open(src, "rb") as fh:
+                data = fh.read()
+        elif str(src).startswith(("http://", "https://")):
+            import requests
+            r = requests.get(src, timeout=10)
+            if r.status_code != 200:
+                return None
+            data = r.content
+        else:
             return None
-        im = Image.open(io.BytesIO(r.content)).convert("RGB")
+        im = Image.open(io.BytesIO(data)).convert("RGB")
         im.thumbnail((max_w, max_h))
         return im
     except Exception:
         return None
+
+
+# Back-compat alias.
+_fetch_image = _load_photo
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -409,8 +426,10 @@ def generate_estimate_jpeg(e: dict, business_name: str = "", quality: int = 92) 
               money(rate_24k), fill=GREEN, font=_font(15, bold=True))
         ry += 62
 
-    photo = _fetch_image(e.get("item_image") or e.get("cad_image"),
-                         W - M - RIGHT_X, 330)
+    # Prefer raw bytes uploaded on the estimate page, then a saved URL/path.
+    photo = _load_photo(
+        e.get("item_image_bytes") or e.get("item_image") or e.get("cad_image"),
+        W - M - RIGHT_X, 330)
     if photo:
         px = RIGHT_X + ((W - M - RIGHT_X) - photo.width) // 2
         img.paste(photo, (px, ry))

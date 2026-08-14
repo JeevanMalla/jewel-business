@@ -537,10 +537,24 @@ def render(gold_base, diamond_base, shape_dfs):
 
         # The spreadsheet-style JPEG stays available for WhatsApp (previews inline).
         with st.expander("Also as WhatsApp JPEG"):
+            # Attach an item photo just for this JPEG — no Cloudinary needed.
+            # The bytes go straight into the render; nothing is saved to the DB.
+            jpeg_upload = st.file_uploader(
+                "Item photo for the estimate (optional)",
+                type=["jpg", "jpeg", "png", "webp"],
+                key=f"jpeg_img_{order_id}",
+            )
+            if jpeg_upload is not None:
+                st.session_state[f"est_jpeg_imgbytes_{order_id}"] = jpeg_upload.getvalue()
+            item_bytes = st.session_state.get(f"est_jpeg_imgbytes_{order_id}")
+            if item_bytes:
+                st.caption("✅ Photo attached — it will appear on the estimate JPEG.")
+
             if st.button("🖼️ Build JPEG", key=f"jpeg_btn_{order_id}", use_container_width=True):
                 bname = get_setting("business_name", "OVURA FINE JEWELLERY")
                 try:
-                    st.session_state[f"est_jpeg_{order_id}"] = generate_estimate_jpeg(est_for_doc, bname)
+                    st.session_state[f"est_jpeg_{order_id}"] = generate_estimate_jpeg(
+                        {**est_for_doc, "item_image_bytes": item_bytes}, bname)
                 except Exception as ex:
                     st.error(f"Image error: {ex}")
             img_bytes = st.session_state.get(f"est_jpeg_{order_id}")
