@@ -49,7 +49,7 @@ def render_image_gallery(order_doc: dict):
         with col:
             if url:
                 has_any = True
-                st.image(url, use_column_width=True)
+                st.image(url, use_container_width=True)
                 st.markdown(
                     f'<p class="img-label">{label}</p>',
                     unsafe_allow_html=True,

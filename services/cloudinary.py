@@ -81,7 +81,7 @@ def upload_image_widget(
     if st.session_state.get(id_key) == uploaded.file_id and st.session_state.get(cache_key):
         url = st.session_state[cache_key]
         st.success("✅ Uploaded")
-        st.image(url, use_column_width=True)
+        st.image(url, use_container_width=True)
         return url
 
     # New file (or first time) — actually upload.
@@ -92,7 +92,7 @@ def upload_image_widget(
             st.session_state[cache_key] = url
             st.session_state[id_key]    = uploaded.file_id
             st.success("✅ Uploaded")
-            st.image(url, use_column_width=True)
+            st.image(url, use_container_width=True)
             return url
         except Exception as e:
             st.error(f"Upload failed: {e}")
